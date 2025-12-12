@@ -1,0 +1,77 @@
+# UniFi MCP Server - Docker Compose Configuration
+# Provides easy deployment with environment variable management
+
+version: '3.8'
+
+services:
+  unifi-mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: unifi-mcp-server:latest
+    container_name: unifi-mcp-server
+    
+    # Environment variables (override in .env file)
+    environment:
+      # UniFi Controller Connection
+      - UNIFI_HOST=${UNIFI_HOST:-192.168.1.1}
+      - UNIFI_PORT=${UNIFI_PORT:-443}
+      - UNIFI_SITE=${UNIFI_SITE:-default}
+      - UNIFI_VERIFY_SSL=${UNIFI_VERIFY_SSL:-false}
+      
+      # Authentication (use API key OR username/password)
+      - UNIFI_API_KEY=${UNIFI_API_KEY:-}
+      - UNIFI_USERNAME=${UNIFI_USERNAME:-}
+      - UNIFI_PASSWORD=${UNIFI_PASSWORD:-}
+      
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    
+    # Load environment from .env file
+    env_file:
+      - .env
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Resource limits (adjust based on your needs)
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+    
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+    
+    # User (run as non-root)
+    user: "1000:1000"
+    
+    # Volumes (optional - for persistent logs)
+    # volumes:
+    #   - ./logs:/app/logs:rw
+    
+    # Network mode (host network for direct controller access)
+    # Uncomment if your UniFi controller is on the same host
+    # network_mode: host
+    
+    # Stdin/stdout for MCP communication
+    stdin_open: true
+    tty: false
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Optional: Define custom network
+# networks:
+#   unifi-network:
+#     driver: bridge

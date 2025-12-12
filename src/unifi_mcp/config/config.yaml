@@ -1,0 +1,110 @@
+---
+# UniFi MCP Server Configuration
+# Environment variables take precedence over values defined here
+# Use ${VAR_NAME} syntax to reference environment variables
+# Use ${VAR_NAME:default_value} to provide defaults
+
+server:
+  name: "unifi-network-mcp"
+  log_level: "${LOG_LEVEL:INFO}"
+  
+  diagnostics:
+    enabled: false
+    log_tool_args: true
+    log_tool_results: true
+    max_payload_chars: 2000
+  
+  performance:
+    cache_ttl: 30  # Default cache TTL in seconds
+    cache_ttl_by_endpoint:
+      devices: 30      # Device list and details
+      clients: 30      # Client list and details
+      networks: 60     # Network and VLAN configuration
+      wlans: 60        # Wireless network configuration
+      firewall: 60     # Firewall rules
+      routes: 60       # Traffic routes
+      port_forwards: 60  # Port forwarding rules
+      stats: 10        # Statistics and monitoring data
+      alerts: 10       # System alerts
+      health: 10       # System health metrics
+    max_concurrent_requests: 10  # Maximum concurrent API requests
+    request_timeout: 30  # Total request timeout in seconds
+    connection_timeout: 10  # Connection establishment timeout in seconds
+    connection_limit: 100  # Total connection pool size
+    connection_limit_per_host: 10  # Connections per host (enables connection pooling)
+  
+  logging:
+    log_to_file: false
+    log_file_path: "/var/log/unifi-mcp-server.log"
+    correlation_ids: true
+
+unifi:
+  # These MUST come from environment variables for security
+  host: "${UNIFI_HOST}"
+  port: "${UNIFI_PORT:443}"
+  
+  # Authentication: Use EITHER api_key OR username+password
+  # API key is recommended for UniFi OS (Dream Machine, Cloud Key Gen2+)
+  api_key: "${UNIFI_API_KEY:}"
+  
+  # Username/password for traditional session-based authentication
+  username: "${UNIFI_USERNAME:}"
+  password: "${UNIFI_PASSWORD:}"
+  
+  site: "${UNIFI_SITE:default}"
+  verify_ssl: "${UNIFI_VERIFY_SSL:false}"
+  
+  retry:
+    max_attempts: 3
+    backoff_factor: 2
+    max_backoff: 30
+
+tools:
+  network_discovery:
+    enabled: true
+    tools:
+      - list_devices
+      - get_device_details
+      - list_clients
+      - get_client_details
+      - list_networks
+      - get_network_details
+      - list_wlans
+      - get_wlan_details
+  
+  security:
+    enabled: true
+    tools:
+      - list_firewall_rules
+      - get_firewall_rule_details
+      - list_traffic_routes
+      - get_route_details
+      - list_port_forwards
+      - get_port_forward_details
+      - get_ips_status
+  
+  statistics:
+    enabled: true
+    tools:
+      - get_network_stats
+      - get_client_stats
+      - get_device_stats
+      - get_top_clients
+      - get_dpi_stats
+      - get_alerts
+      - get_system_health
+  
+  migration:
+    enabled: true
+    tools:
+      - get_dhcp_status
+      - verify_vlan_connectivity
+      - export_configuration
+  
+  write_operations:
+    enabled: false  # Disabled by default for safety
+    require_confirmation: true
+    tools:
+      - toggle_firewall_rule
+      - create_firewall_rule
+      - update_firewall_rule
