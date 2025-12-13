@@ -41,6 +41,12 @@ from unifi_mcp.utils.retry import (
     RetryableError,
     NonRetryableError,
 )
+from unifi_mcp.api import (
+    ControllerType,
+    ControllerDetector,
+    EndpointRouter,
+    ResponseNormalizer,
+)
 
 
 class UniFiClientError(Exception):
@@ -144,6 +150,11 @@ class UniFiClient:
         # Concurrent request limiting
         self._request_semaphore = asyncio.Semaphore(self.max_concurrent_requests)
         
+        # API abstraction layer components (initialized after connection)
+        self._controller_detector: Optional[ControllerDetector] = None
+        self._endpoint_router: Optional[EndpointRouter] = None
+        self._response_normalizer: Optional[ResponseNormalizer] = None
+        
         auth_method = "API Key" if self.use_api_key else "Username/Password"
         self.logger.info(
             "UniFi client initialized",
@@ -159,6 +170,19 @@ class UniFiClient:
                 "max_concurrent_requests": self.max_concurrent_requests,
             }
         )
+    
+    @property
+    def controller_type(self) -> ControllerType:
+        """Get the detected controller type.
+        
+        Returns:
+            ControllerType indicating whether this is UniFi OS or traditional controller.
+            Returns UNKNOWN if detection hasn't been performed yet.
+        """
+        if self._controller_detector is None:
+            return ControllerType.UNKNOWN
+        cached = self._controller_detector.get_cached_type()
+        return cached if cached is not None else ControllerType.UNKNOWN
     
     def _setup_performance_config(self, server_config: Optional[Dict[str, Any]] = None) -> None:
         """Set up performance configuration.
@@ -409,9 +433,20 @@ class UniFiClient:
                 # Session-based auth requires login
                 await self._authenticate()
             
+            # Initialize API abstraction layer components
+            self._controller_detector = ControllerDetector(self)
+            self._endpoint_router = EndpointRouter()
+            self._response_normalizer = ResponseNormalizer()
+            
+            # Detect controller type after authentication
+            detected_type = await self._controller_detector.detect()
+            
             self.logger.info(
                 "Successfully connected to UniFi controller",
-                extra={"correlation_id": correlation_id}
+                extra={
+                    "correlation_id": correlation_id,
+                    "controller_type": detected_type.value,
+                }
             )
         
         except aiohttp.ClientError as e:
@@ -950,3 +985,161 @@ class UniFiClient:
                     }
                 )
                 raise UniFiClientError(f"POST request to {endpoint} failed: {e}")
+    
+    async def get_security_data(
+        self,
+        feature: str,
+        normalize: bool = True,
+        site: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get security data with automatic endpoint routing and normalization.
+        
+        This method provides a high-level interface for retrieving security-related
+        data (firewall rules, IPS status, traffic routes, port forwards) with
+        automatic endpoint routing based on the detected controller type.
+        
+        The method:
+        1. Uses the detected controller type to select the correct API endpoint
+        2. Makes the request with automatic fallback to legacy endpoints
+        3. Optionally normalizes the response to a consistent format
+        
+        Args:
+            feature: Security feature to retrieve. Valid values:
+                - "firewall_rules": Firewall rules/traffic routes
+                - "ips_status": IPS/threat management status
+                - "traffic_routes": Traffic routing rules
+                - "port_forwards": Port forwarding rules
+            normalize: Whether to normalize the response (default: True)
+            site: Optional site name (uses client's default if not provided)
+        
+        Returns:
+            Dictionary containing:
+            - data: Response data (normalized if normalize=True)
+            - endpoint_used: The endpoint that succeeded
+            - api_version: "v2" or "v1"
+            - fallback_used: Whether fallback was used
+            - controller_type: Detected controller type
+        
+        Raises:
+            UniFiClientError: If not connected or API layer not initialized
+            ValueError: If feature is not recognized
+            Exception: If both primary and fallback endpoints fail
+        
+        Example:
+            >>> result = await client.get_security_data("firewall_rules")
+            >>> for rule in result["data"]:
+            ...     print(f"{rule['name']}: {rule['action']}")
+        """
+        if not self.session:
+            raise UniFiClientError("Not connected. Call connect() first.")
+        
+        if self._endpoint_router is None:
+            raise UniFiClientError(
+                "API layer not initialized. Ensure connect() completed successfully."
+            )
+        
+        site = site or self.config.site
+        controller_type = self.controller_type
+        
+        self.logger.debug(
+            f"Getting security data for feature '{feature}'",
+            extra={
+                "feature": feature,
+                "controller_type": controller_type.value,
+                "normalize": normalize,
+                "site": site,
+            }
+        )
+        
+        # Use endpoint router to make request with fallback
+        result = await self._endpoint_router.request_with_fallback(
+            client=self,
+            feature=feature,
+            controller_type=controller_type,
+            site=site,
+        )
+        
+        # Add controller type to result
+        result["controller_type"] = controller_type.value
+        
+        # Normalize response if requested
+        if normalize and self._response_normalizer is not None:
+            result["data"] = self._normalize_security_data(
+                feature=feature,
+                data=result["data"],
+                controller_type=controller_type,
+            )
+        
+        return result
+    
+    def _normalize_security_data(
+        self,
+        feature: str,
+        data: Any,
+        controller_type: ControllerType,
+    ) -> Any:
+        """Normalize security data based on feature type.
+        
+        Args:
+            feature: Security feature name
+            data: Raw API response data
+            controller_type: Controller type for normalization
+        
+        Returns:
+            Normalized data (list of dicts or dict depending on feature)
+        """
+        if self._response_normalizer is None:
+            return data
+        
+        # Extract data from response wrapper if present
+        raw_data = data
+        if isinstance(data, dict):
+            # UniFi API often wraps data in {"data": [...]} or {"meta": {...}, "data": [...]}
+            if "data" in data:
+                raw_data = data["data"]
+        
+        # Normalize based on feature type
+        if feature == "firewall_rules":
+            if isinstance(raw_data, list):
+                normalized = self._response_normalizer.normalize_firewall_rules(
+                    raw_data, controller_type
+                )
+                return self._response_normalizer.to_dict_list(normalized)
+            return raw_data
+        
+        elif feature == "ips_status":
+            if isinstance(raw_data, dict):
+                normalized = self._response_normalizer.normalize_ips_status(
+                    raw_data, controller_type
+                )
+                return self._response_normalizer.to_dict(normalized)
+            elif isinstance(raw_data, list) and len(raw_data) > 0:
+                # Some endpoints return IPS settings as a list with one item
+                normalized = self._response_normalizer.normalize_ips_status(
+                    raw_data[0], controller_type
+                )
+                return self._response_normalizer.to_dict(normalized)
+            return raw_data
+        
+        elif feature == "traffic_routes":
+            if isinstance(raw_data, list):
+                normalized = self._response_normalizer.normalize_traffic_routes(
+                    raw_data, controller_type
+                )
+                return self._response_normalizer.to_dict_list(normalized)
+            return raw_data
+        
+        elif feature == "port_forwards":
+            if isinstance(raw_data, list):
+                normalized = self._response_normalizer.normalize_port_forwards(
+                    raw_data, controller_type
+                )
+                return self._response_normalizer.to_dict_list(normalized)
+            return raw_data
+        
+        else:
+            # Unknown feature, return as-is
+            self.logger.warning(
+                f"Unknown feature '{feature}' for normalization, returning raw data"
+            )
+            return raw_data

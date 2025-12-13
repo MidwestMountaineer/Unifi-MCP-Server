@@ -120,7 +120,39 @@ def mock_unifi_client():
     """Create a mock UniFi client."""
     client = MagicMock(spec=UniFiClient)
     client.get = AsyncMock()
+    client.get_security_data = AsyncMock()
     return client
+
+
+def create_security_data_response(data, api_version="v1", controller_type="traditional"):
+    """Helper to create a mock get_security_data response with normalized data."""
+    # Convert raw data to normalized format
+    normalized_data = []
+    for item in data:
+        normalized_item = {
+            "id": item.get("_id", item.get("id", "")),
+            "name": item.get("name", ""),
+            "enabled": item.get("enabled", False),
+            "action": item.get("action", "").upper() if item.get("action") else "",
+            "protocol": item.get("protocol", "all").upper().replace("_", "/"),
+            "source_zone": item.get("src_firewallgroup_ids", [""])[0] if item.get("src_firewallgroup_ids") else "",
+            "destination_zone": item.get("dst_firewallgroup_ids", [""])[0] if item.get("dst_firewallgroup_ids") else "",
+            "source_address": item.get("src_address", ""),
+            "destination_address": item.get("dst_address", ""),
+            "destination_port": item.get("dst_port", ""),
+            "logging": item.get("logging", False),
+            "api_version": api_version,
+            "raw_type": str(item.get("rule_index", "")),
+        }
+        normalized_data.append(normalized_item)
+    
+    return {
+        "data": normalized_data,
+        "api_version": api_version,
+        "controller_type": controller_type,
+        "endpoint_used": "/api/s/{site}/rest/firewallrule",
+        "fallback_used": False,
+    }
 
 
 class TestListFirewallRulesTool:
@@ -129,8 +161,8 @@ class TestListFirewallRulesTool:
     @pytest.mark.asyncio
     async def test_list_all_rules(self, mock_unifi_client):
         """Test listing all firewall rules without filtering."""
-        # Setup mock response
-        mock_unifi_client.get.return_value = {"data": MOCK_FIREWALL_RULES}
+        # Setup mock response using get_security_data
+        mock_unifi_client.get_security_data.return_value = create_security_data_response(MOCK_FIREWALL_RULES)
         
         # Create tool and execute
         tool = ListFirewallRulesTool()
@@ -145,14 +177,12 @@ class TestListFirewallRulesTool:
         assert result["page_size"] == 50
         
         # Verify API call
-        mock_unifi_client.get.assert_called_once()
-        call_args = mock_unifi_client.get.call_args[0][0]
-        assert "/rest/firewallrule" in call_args
+        mock_unifi_client.get_security_data.assert_called_once_with("firewall_rules")
     
     @pytest.mark.asyncio
     async def test_list_rules_enabled_only(self, mock_unifi_client):
         """Test filtering rules by enabled status."""
-        mock_unifi_client.get.return_value = {"data": MOCK_FIREWALL_RULES}
+        mock_unifi_client.get_security_data.return_value = create_security_data_response(MOCK_FIREWALL_RULES)
         
         tool = ListFirewallRulesTool()
         result = await tool.execute(mock_unifi_client, enabled_only=True)
@@ -165,7 +195,7 @@ class TestListFirewallRulesTool:
     @pytest.mark.asyncio
     async def test_list_rules_pagination(self, mock_unifi_client):
         """Test pagination of firewall rule list."""
-        mock_unifi_client.get.return_value = {"data": MOCK_FIREWALL_RULES}
+        mock_unifi_client.get_security_data.return_value = create_security_data_response(MOCK_FIREWALL_RULES)
         
         tool = ListFirewallRulesTool()
         
@@ -200,7 +230,7 @@ class TestListFirewallRulesTool:
     @pytest.mark.asyncio
     async def test_list_rules_last_page_partial(self, mock_unifi_client):
         """Test last page with partial results."""
-        mock_unifi_client.get.return_value = {"data": MOCK_FIREWALL_RULES}
+        mock_unifi_client.get_security_data.return_value = create_security_data_response(MOCK_FIREWALL_RULES)
         
         tool = ListFirewallRulesTool()
         result = await tool.execute(
@@ -218,7 +248,7 @@ class TestListFirewallRulesTool:
     @pytest.mark.asyncio
     async def test_list_rules_empty_result(self, mock_unifi_client):
         """Test listing rules when none exist."""
-        mock_unifi_client.get.return_value = {"data": []}
+        mock_unifi_client.get_security_data.return_value = create_security_data_response([])
         
         tool = ListFirewallRulesTool()
         result = await tool.execute(mock_unifi_client)
@@ -231,7 +261,7 @@ class TestListFirewallRulesTool:
     @pytest.mark.asyncio
     async def test_list_rules_api_error(self, mock_unifi_client):
         """Test handling of API errors."""
-        mock_unifi_client.get.side_effect = Exception("API connection failed")
+        mock_unifi_client.get_security_data.side_effect = Exception("API connection failed")
         
         tool = ListFirewallRulesTool()
         
@@ -245,15 +275,15 @@ class TestListFirewallRulesTool:
     @pytest.mark.asyncio
     async def test_rule_summary_format(self, mock_unifi_client):
         """Test that rule summary contains expected fields."""
-        mock_unifi_client.get.return_value = {"data": MOCK_FIREWALL_RULES}
+        mock_unifi_client.get_security_data.return_value = create_security_data_response(MOCK_FIREWALL_RULES)
         
         tool = ListFirewallRulesTool()
         result = await tool.execute(mock_unifi_client)
         
-        # Check first rule has expected summary fields
+        # Check first rule has expected summary fields (normalized format)
         rule = result["data"][0]
         expected_fields = [
-            "id", "rule_index", "name", "enabled", "action",
+            "id", "name", "enabled", "action",
             "protocol", "source_zone", "destination_zone",
             "source_address", "destination_address", "destination_port", "logging"
         ]
@@ -264,7 +294,7 @@ class TestListFirewallRulesTool:
     @pytest.mark.asyncio
     async def test_rule_action_formatting(self, mock_unifi_client):
         """Test that rule actions are formatted correctly."""
-        mock_unifi_client.get.return_value = {"data": MOCK_FIREWALL_RULES}
+        mock_unifi_client.get_security_data.return_value = create_security_data_response(MOCK_FIREWALL_RULES)
         
         tool = ListFirewallRulesTool()
         result = await tool.execute(mock_unifi_client)
@@ -277,7 +307,7 @@ class TestListFirewallRulesTool:
     @pytest.mark.asyncio
     async def test_protocol_formatting(self, mock_unifi_client):
         """Test that protocols are formatted correctly."""
-        mock_unifi_client.get.return_value = {"data": MOCK_FIREWALL_RULES}
+        mock_unifi_client.get_security_data.return_value = create_security_data_response(MOCK_FIREWALL_RULES)
         
         tool = ListFirewallRulesTool()
         result = await tool.execute(mock_unifi_client)
@@ -291,7 +321,7 @@ class TestListFirewallRulesTool:
     @pytest.mark.asyncio
     async def test_address_formatting(self, mock_unifi_client):
         """Test that addresses are formatted correctly."""
-        mock_unifi_client.get.return_value = {"data": MOCK_FIREWALL_RULES}
+        mock_unifi_client.get_security_data.return_value = create_security_data_response(MOCK_FIREWALL_RULES)
         
         tool = ListFirewallRulesTool()
         result = await tool.execute(mock_unifi_client)
@@ -304,7 +334,7 @@ class TestListFirewallRulesTool:
     @pytest.mark.asyncio
     async def test_port_formatting(self, mock_unifi_client):
         """Test that ports are formatted correctly."""
-        mock_unifi_client.get.return_value = {"data": MOCK_FIREWALL_RULES}
+        mock_unifi_client.get_security_data.return_value = create_security_data_response(MOCK_FIREWALL_RULES)
         
         tool = ListFirewallRulesTool()
         result = await tool.execute(mock_unifi_client)
@@ -336,7 +366,7 @@ class TestGetFirewallRuleDetailsTool:
     @pytest.mark.asyncio
     async def test_get_rule_by_id(self, mock_unifi_client):
         """Test getting firewall rule details by ID."""
-        mock_unifi_client.get.return_value = {"data": MOCK_FIREWALL_RULES}
+        mock_unifi_client.get_security_data.return_value = create_security_data_response(MOCK_FIREWALL_RULES)
         
         tool = GetFirewallRuleDetailsTool()
         result = await tool.execute(mock_unifi_client, rule_id="rule1")
@@ -353,7 +383,7 @@ class TestGetFirewallRuleDetailsTool:
     @pytest.mark.asyncio
     async def test_get_rule_not_found(self, mock_unifi_client):
         """Test getting rule that doesn't exist."""
-        mock_unifi_client.get.return_value = {"data": MOCK_FIREWALL_RULES}
+        mock_unifi_client.get_security_data.return_value = create_security_data_response(MOCK_FIREWALL_RULES)
         
         tool = GetFirewallRuleDetailsTool()
         
@@ -367,20 +397,19 @@ class TestGetFirewallRuleDetailsTool:
     @pytest.mark.asyncio
     async def test_rule_detail_format(self, mock_unifi_client):
         """Test that rule details contain expected fields."""
-        mock_unifi_client.get.return_value = {"data": MOCK_FIREWALL_RULES}
+        mock_unifi_client.get_security_data.return_value = create_security_data_response(MOCK_FIREWALL_RULES)
         
         tool = GetFirewallRuleDetailsTool()
         result = await tool.execute(mock_unifi_client, rule_id="rule1")
         
         rule = result["data"]
         
-        # Check basic fields
+        # Check basic fields (normalized format)
         expected_fields = [
-            "id", "rule_index", "name", "enabled", "action", "logging",
-            "protocol", "protocol_match_excepted",
-            "source", "destination",
-            "state_new", "state_established", "state_invalid", "state_related",
-            "icmp_typename", "ipsec"
+            "id", "name", "enabled", "action", "logging",
+            "protocol", "source_zone", "destination_zone",
+            "source_address", "destination_address", "destination_port",
+            "api_version"
         ]
         
         for field in expected_fields:
@@ -389,92 +418,73 @@ class TestGetFirewallRuleDetailsTool:
     @pytest.mark.asyncio
     async def test_rule_source_config(self, mock_unifi_client):
         """Test that source configuration is formatted correctly."""
-        mock_unifi_client.get.return_value = {"data": MOCK_FIREWALL_RULES}
+        mock_unifi_client.get_security_data.return_value = create_security_data_response(MOCK_FIREWALL_RULES)
         
         tool = GetFirewallRuleDetailsTool()
         result = await tool.execute(mock_unifi_client, rule_id="rule1")
         
         rule = result["data"]
-        assert "source" in rule
-        
-        source = rule["source"]
-        assert "address" in source
-        assert "network_id" in source
-        assert "firewall_groups" in source
-        assert "mac_address" in source
-        assert "port" in source
-        assert "address_display" in source
+        # Normalized format uses flat fields
+        assert "source_zone" in rule
+        assert "source_address" in rule
+        assert rule["source_address"] == "192.168.10.0/24"
     
     @pytest.mark.asyncio
     async def test_rule_destination_config(self, mock_unifi_client):
         """Test that destination configuration is formatted correctly."""
-        mock_unifi_client.get.return_value = {"data": MOCK_FIREWALL_RULES}
+        mock_unifi_client.get_security_data.return_value = create_security_data_response(MOCK_FIREWALL_RULES)
         
         tool = GetFirewallRuleDetailsTool()
         result = await tool.execute(mock_unifi_client, rule_id="rule1")
         
         rule = result["data"]
-        assert "destination" in rule
-        
-        destination = rule["destination"]
-        assert "address" in destination
-        assert "network_id" in destination
-        assert "firewall_groups" in destination
-        assert "port" in destination
-        assert "address_display" in destination
+        # Normalized format uses flat fields
+        assert "destination_zone" in rule
+        assert "destination_address" in rule
+        assert "destination_port" in rule
     
     @pytest.mark.asyncio
     async def test_rule_protocol_details(self, mock_unifi_client):
         """Test that protocol details are formatted correctly."""
-        mock_unifi_client.get.return_value = {"data": MOCK_FIREWALL_RULES}
+        mock_unifi_client.get_security_data.return_value = create_security_data_response(MOCK_FIREWALL_RULES)
         
         tool = GetFirewallRuleDetailsTool()
         result = await tool.execute(mock_unifi_client, rule_id="rule3")
         
         rule = result["data"]
         assert "protocol" in rule
-        
-        protocol = rule["protocol"]
-        assert "type" in protocol
-        assert "display" in protocol
-        assert protocol["type"] == "tcp"
-        assert protocol["display"] == "TCP"
+        # Normalized format has protocol as a string
+        assert rule["protocol"] == "TCP"
     
     @pytest.mark.asyncio
     async def test_rule_tcp_flags(self, mock_unifi_client):
-        """Test that TCP flags are included for TCP rules."""
-        mock_unifi_client.get.return_value = {"data": MOCK_FIREWALL_RULES}
+        """Test that TCP rules are identified correctly."""
+        mock_unifi_client.get_security_data.return_value = create_security_data_response(MOCK_FIREWALL_RULES)
         
         tool = GetFirewallRuleDetailsTool()
         result = await tool.execute(mock_unifi_client, rule_id="rule3")
         
         rule = result["data"]
-        protocol = rule["protocol"]
-        
-        # TCP rule should have tcp_flags
-        assert "tcp_flags" in protocol
-        assert protocol["tcp_flags"] == ["syn"]
+        # Normalized format has protocol as a string
+        assert rule["protocol"] == "TCP"
     
     @pytest.mark.asyncio
     async def test_rule_state_fields(self, mock_unifi_client):
-        """Test that state fields are included."""
-        mock_unifi_client.get.return_value = {"data": MOCK_FIREWALL_RULES}
+        """Test that enabled state is included."""
+        mock_unifi_client.get_security_data.return_value = create_security_data_response(MOCK_FIREWALL_RULES)
         
         tool = GetFirewallRuleDetailsTool()
         result = await tool.execute(mock_unifi_client, rule_id="rule1")
         
         rule = result["data"]
         
-        # Check state fields
-        assert rule["state_new"] is True
-        assert rule["state_established"] is True
-        assert rule["state_invalid"] is False
-        assert rule["state_related"] is True
+        # Check enabled field
+        assert rule["enabled"] is True
     
     @pytest.mark.asyncio
     async def test_rule_logging_field(self, mock_unifi_client):
         """Test that logging field is included."""
-        mock_unifi_client.get.return_value = {"data": MOCK_FIREWALL_RULES}
+        mock_unifi_client.get_security_data.return_value = create_security_data_response(MOCK_FIREWALL_RULES)
         
         tool = GetFirewallRuleDetailsTool()
         
@@ -489,7 +499,7 @@ class TestGetFirewallRuleDetailsTool:
     @pytest.mark.asyncio
     async def test_api_error_handling(self, mock_unifi_client):
         """Test handling of API errors."""
-        mock_unifi_client.get.side_effect = Exception("API connection failed")
+        mock_unifi_client.get_security_data.side_effect = Exception("API connection failed")
         
         tool = GetFirewallRuleDetailsTool()
         
@@ -517,7 +527,7 @@ class TestGetFirewallRuleDetailsTool:
     @pytest.mark.asyncio
     async def test_case_insensitive_search(self, mock_unifi_client):
         """Test that rule search is case-insensitive."""
-        mock_unifi_client.get.return_value = {"data": MOCK_FIREWALL_RULES}
+        mock_unifi_client.get_security_data.return_value = create_security_data_response(MOCK_FIREWALL_RULES)
         
         tool = GetFirewallRuleDetailsTool()
         

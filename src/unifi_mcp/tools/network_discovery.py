@@ -40,6 +40,9 @@ class ListDevicesTool(BaseTool):
     description = "List all UniFi devices (switches, APs, gateways) with optional filtering"
     category = "network_discovery"
     
+    # Fields to include in concise response format
+    CONCISE_FIELDS = ["id", "name", "type", "status", "ip"]
+    
     input_schema = {
         "type": "object",
         "properties": {
@@ -61,6 +64,12 @@ class ListDevicesTool(BaseTool):
                 "minimum": 1,
                 "maximum": 500,
                 "default": 50
+            },
+            "response_format": {
+                "type": "string",
+                "enum": ["detailed", "concise"],
+                "description": "Response format: 'detailed' for all fields, 'concise' for essential fields only",
+                "default": "detailed"
             }
         }
     }
@@ -71,6 +80,7 @@ class ListDevicesTool(BaseTool):
         device_type: str = "all",
         page: int = 1,
         page_size: int = 50,
+        response_format: str = "detailed",
         **kwargs: Any
     ) -> Dict[str, Any]:
         """Execute the list devices tool.
@@ -80,6 +90,7 @@ class ListDevicesTool(BaseTool):
             device_type: Filter by device type (all, switch, ap, gateway)
             page: Page number for pagination
             page_size: Number of devices per page
+            response_format: "detailed" or "concise" response format
             **kwargs: Additional arguments (ignored)
         
         Returns:
@@ -88,7 +99,8 @@ class ListDevicesTool(BaseTool):
         try:
             # Fetch devices from UniFi controller
             logger.info(
-                f"Fetching devices (type={device_type}, page={page}, page_size={page_size})"
+                f"Fetching devices (type={device_type}, page={page}, "
+                f"page_size={page_size}, format={response_format})"
             )
             
             response = await unifi_client.get(f"/api/s/{{site}}/stat/device")
@@ -117,11 +129,13 @@ class ListDevicesTool(BaseTool):
                 f"(page {page}/{(total + page_size - 1) // page_size}, total={total})"
             )
             
-            return self.format_list(
+            return self.format_list_with_truncation(
                 items=paginated_devices,
                 total=total,
                 page=page,
-                page_size=page_size
+                page_size=page_size,
+                response_format=response_format,
+                concise_fields=self.CONCISE_FIELDS
             )
         
         except Exception as e:
@@ -538,6 +552,9 @@ class ListClientsTool(BaseTool):
     description = "List all connected clients across the network with optional filtering"
     category = "network_discovery"
     
+    # Fields to include in concise response format
+    CONCISE_FIELDS = ["mac", "name", "ip", "connection_type"]
+    
     input_schema = {
         "type": "object",
         "properties": {
@@ -559,6 +576,12 @@ class ListClientsTool(BaseTool):
                 "minimum": 1,
                 "maximum": 500,
                 "default": 50
+            },
+            "response_format": {
+                "type": "string",
+                "enum": ["detailed", "concise"],
+                "description": "Response format: 'detailed' for all fields, 'concise' for essential fields only",
+                "default": "detailed"
             }
         }
     }
@@ -569,6 +592,7 @@ class ListClientsTool(BaseTool):
         connection_type: str = "all",
         page: int = 1,
         page_size: int = 50,
+        response_format: str = "detailed",
         **kwargs: Any
     ) -> Dict[str, Any]:
         """Execute the list clients tool.
@@ -578,6 +602,7 @@ class ListClientsTool(BaseTool):
             connection_type: Filter by connection type (all, wired, wireless)
             page: Page number for pagination
             page_size: Number of clients per page
+            response_format: "detailed" or "concise" response format
             **kwargs: Additional arguments (ignored)
         
         Returns:
@@ -586,7 +611,8 @@ class ListClientsTool(BaseTool):
         try:
             # Fetch clients from UniFi controller
             logger.info(
-                f"Fetching clients (type={connection_type}, page={page}, page_size={page_size})"
+                f"Fetching clients (type={connection_type}, page={page}, "
+                f"page_size={page_size}, format={response_format})"
             )
             
             response = await unifi_client.get(f"/api/s/{{site}}/stat/sta")
@@ -615,11 +641,13 @@ class ListClientsTool(BaseTool):
                 f"(page {page}/{(total + page_size - 1) // page_size}, total={total})"
             )
             
-            return self.format_list(
+            return self.format_list_with_truncation(
                 items=paginated_clients,
                 total=total,
                 page=page,
-                page_size=page_size
+                page_size=page_size,
+                response_format=response_format,
+                concise_fields=self.CONCISE_FIELDS
             )
         
         except Exception as e:

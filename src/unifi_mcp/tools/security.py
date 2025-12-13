@@ -11,12 +11,47 @@ making any changes to the firewall configuration.
 
 from typing import Any, Dict, List, Optional
 
+from ..api.endpoint_router import EndpointError
 from ..tools.base import BaseTool, ToolError
 from ..unifi_client import UniFiClient
 from ..utils.logging import get_logger
 
 
 logger = get_logger(__name__)
+
+
+def _handle_endpoint_error(error: EndpointError, feature_name: str) -> ToolError:
+    """Convert EndpointError to ToolError with appropriate messaging.
+    
+    This helper function provides consistent error handling for security tools
+    when endpoint requests fail, including fallback failures.
+    
+    Args:
+        error: The EndpointError from the endpoint router
+        feature_name: Human-readable name of the feature (e.g., "firewall rules")
+    
+    Returns:
+        ToolError with appropriate code, message, and actionable steps
+    """
+    if error.fallback_endpoint and error.fallback_error:
+        # Both endpoints failed
+        return ToolError(
+            code="BOTH_ENDPOINTS_FAILED",
+            message=f"Failed to retrieve {feature_name} - both v2 and v1 API endpoints failed",
+            details=(
+                f"v2 endpoint ({error.primary_endpoint}): {error.primary_error}. "
+                f"v1 fallback ({error.fallback_endpoint}): {error.fallback_error}"
+            ),
+            actionable_steps=error.get_actionable_steps()
+        )
+    else:
+        # Single endpoint failed (traditional controller or no fallback available)
+        return ToolError(
+            code="API_ERROR",
+            message=f"Failed to retrieve {feature_name}",
+            details=f"Endpoint {error.primary_endpoint}: {error.primary_error}",
+            actionable_steps=error.get_actionable_steps()
+        )
 
 
 class ListFirewallRulesTool(BaseTool):
@@ -36,6 +71,9 @@ class ListFirewallRulesTool(BaseTool):
     name = "unifi_list_firewall_rules"
     description = "List all firewall policies and rules with optional filtering"
     category = "security"
+    
+    # Fields to include in concise response format
+    CONCISE_FIELDS = ["id", "name", "enabled", "action", "protocol"]
     
     input_schema = {
         "type": "object",
@@ -57,6 +95,12 @@ class ListFirewallRulesTool(BaseTool):
                 "minimum": 1,
                 "maximum": 500,
                 "default": 50
+            },
+            "response_format": {
+                "type": "string",
+                "enum": ["detailed", "concise"],
+                "description": "Response format: 'detailed' for all fields, 'concise' for essential fields only",
+                "default": "detailed"
             }
         }
     }
@@ -67,6 +111,7 @@ class ListFirewallRulesTool(BaseTool):
         enabled_only: bool = False,
         page: int = 1,
         page_size: int = 50,
+        response_format: str = "detailed",
         **kwargs: Any
     ) -> Dict[str, Any]:
         """Execute the list firewall rules tool.
@@ -76,24 +121,30 @@ class ListFirewallRulesTool(BaseTool):
             enabled_only: Show only enabled rules if True
             page: Page number for pagination
             page_size: Number of rules per page
+            response_format: "detailed" or "concise" response format
             **kwargs: Additional arguments (ignored)
         
         Returns:
             Formatted list of firewall rules with pagination info
         """
         try:
-            # Fetch firewall rules from UniFi controller
+            # Fetch firewall rules using endpoint routing for v2 API support
             logger.info(
                 f"Fetching firewall rules (enabled_only={enabled_only}, "
-                f"page={page}, page_size={page_size})"
+                f"page={page}, page_size={page_size}, format={response_format})"
             )
             
-            response = await unifi_client.get(f"/api/s/{{site}}/rest/firewallrule")
+            # Use get_security_data for automatic endpoint routing and normalization
+            result = await unifi_client.get_security_data("firewall_rules")
             
-            # Extract rule data from response
-            rules = response.get("data", [])
+            # Extract normalized rule data
+            rules = result.get("data", [])
+            api_version = result.get("api_version", "v1")
             
-            logger.debug(f"Retrieved {len(rules)} firewall rules from controller")
+            logger.debug(
+                f"Retrieved {len(rules)} firewall rules from controller "
+                f"(api_version={api_version})"
+            )
             
             # Filter by enabled status if specified
             if enabled_only:
@@ -101,8 +152,9 @@ class ListFirewallRulesTool(BaseTool):
                 logger.debug(f"Filtered to {len(rules)} enabled rules")
             
             # Format rules for AI consumption (summary view)
+            # Data is already normalized, just extract summary fields
             formatted_rules = [
-                self._format_rule_summary(rule)
+                self._format_normalized_rule_summary(rule)
                 for rule in rules
             ]
             
@@ -114,12 +166,26 @@ class ListFirewallRulesTool(BaseTool):
                 f"(page {page}/{(total + page_size - 1) // page_size}, total={total})"
             )
             
-            return self.format_list(
+            # Use format_list_with_truncation for response format support
+            response = self.format_list_with_truncation(
                 items=paginated_rules,
                 total=total,
                 page=page,
-                page_size=page_size
+                page_size=page_size,
+                response_format=response_format,
+                concise_fields=self.CONCISE_FIELDS
             )
+            
+            # Add api_version to response metadata
+            response["api_version"] = api_version
+            response["controller_type"] = result.get("controller_type", "unknown")
+            
+            return response
+        
+        except EndpointError as e:
+            # Handle v2 endpoint failures gracefully with clear error messages
+            logger.error(f"Failed to list firewall rules: {e}", exc_info=True)
+            raise _handle_endpoint_error(e, "firewall rules")
         
         except Exception as e:
             logger.error(f"Failed to list firewall rules: {e}", exc_info=True)
@@ -133,6 +199,32 @@ class ListFirewallRulesTool(BaseTool):
                     "Check server logs for details"
                 ]
             )
+    
+    def _format_normalized_rule_summary(self, rule: Dict[str, Any]) -> Dict[str, Any]:
+        """Format normalized firewall rule data for summary view (AI-friendly).
+        
+        Works with normalized rule data from ResponseNormalizer.
+        
+        Args:
+            rule: Normalized firewall rule data
+        
+        Returns:
+            Formatted firewall rule summary
+        """
+        return {
+            "id": rule.get("id", ""),
+            "name": rule.get("name", "Unnamed Rule"),
+            "enabled": rule.get("enabled", False),
+            "action": rule.get("action", ""),
+            "protocol": rule.get("protocol", "ALL"),
+            "source_zone": rule.get("source_zone", "any"),
+            "destination_zone": rule.get("destination_zone", "any"),
+            "source_address": rule.get("source_address", "any"),
+            "destination_address": rule.get("destination_address", "any"),
+            "destination_port": rule.get("destination_port", "any"),
+            "logging": rule.get("logging", False),
+            "api_version": rule.get("api_version", ""),
+        }
     
     def _format_rule_summary(self, rule: Dict[str, Any]) -> Dict[str, Any]:
         """Format firewall rule data for summary view (AI-friendly).
@@ -275,11 +367,13 @@ class GetFirewallRuleDetailsTool(BaseTool):
             Formatted firewall rule details
         """
         try:
-            # Fetch all firewall rules (UniFi doesn't have a single rule endpoint)
+            # Fetch all firewall rules using endpoint routing for v2 API support
             logger.info(f"Fetching details for firewall rule: {rule_id}")
             
-            response = await unifi_client.get(f"/api/s/{{site}}/rest/firewallrule")
-            rules = response.get("data", [])
+            # Use get_security_data for automatic endpoint routing and normalization
+            result = await unifi_client.get_security_data("firewall_rules")
+            rules = result.get("data", [])
+            api_version = result.get("api_version", "v1")
             
             # Find the specific rule by ID
             rule = self._find_rule(rules, rule_id)
@@ -296,19 +390,33 @@ class GetFirewallRuleDetailsTool(BaseTool):
                     ]
                 )
             
-            # Format rule details for AI consumption
-            formatted_rule = self._format_rule_details(rule)
+            # Format rule details for AI consumption (data is already normalized)
+            formatted_rule = self._format_normalized_rule_details(rule)
             
-            logger.info(f"Retrieved details for firewall rule: {formatted_rule['name']}")
+            logger.info(
+                f"Retrieved details for firewall rule: {formatted_rule['name']} "
+                f"(api_version={api_version})"
+            )
             
-            return self.format_detail(
+            response = self.format_detail(
                 item=formatted_rule,
                 item_type="firewall_rule"
             )
+            
+            # Add api_version to response metadata
+            response["api_version"] = api_version
+            response["controller_type"] = result.get("controller_type", "unknown")
+            
+            return response
         
         except ToolError:
             # Re-raise tool errors
             raise
+        
+        except EndpointError as e:
+            # Handle v2 endpoint failures gracefully with clear error messages
+            logger.error(f"Failed to get firewall rule details: {e}", exc_info=True)
+            raise _handle_endpoint_error(e, "firewall rule details")
         
         except Exception as e:
             logger.error(f"Failed to get firewall rule details: {e}", exc_info=True)
@@ -331,7 +439,7 @@ class GetFirewallRuleDetailsTool(BaseTool):
         """Find a firewall rule by ID.
         
         Args:
-            rules: List of firewall rule dictionaries
+            rules: List of firewall rule dictionaries (normalized or raw)
             rule_id: Rule ID to search for
         
         Returns:
@@ -340,11 +448,50 @@ class GetFirewallRuleDetailsTool(BaseTool):
         rule_id_lower = rule_id.lower()
         
         for rule in rules:
-            # Check ID
-            if rule.get("_id", "").lower() == rule_id_lower:
+            # Check normalized 'id' field first, then legacy '_id' field
+            rule_id_value = rule.get("id", rule.get("_id", ""))
+            if str(rule_id_value).lower() == rule_id_lower:
                 return rule
         
         return None
+    
+    def _format_normalized_rule_details(self, rule: Dict[str, Any]) -> Dict[str, Any]:
+        """Format normalized firewall rule data for detailed view (AI-friendly).
+        
+        Works with normalized rule data from ResponseNormalizer.
+        
+        Args:
+            rule: Normalized firewall rule data
+        
+        Returns:
+            Formatted firewall rule details
+        """
+        return {
+            # Basic information
+            "id": rule.get("id", ""),
+            "name": rule.get("name", "Unnamed Rule"),
+            "enabled": rule.get("enabled", False),
+            
+            # Action
+            "action": rule.get("action", ""),
+            "logging": rule.get("logging", False),
+            
+            # Protocol
+            "protocol": rule.get("protocol", "ALL"),
+            
+            # Source configuration
+            "source_zone": rule.get("source_zone", ""),
+            "source_address": rule.get("source_address", "any"),
+            
+            # Destination configuration
+            "destination_zone": rule.get("destination_zone", ""),
+            "destination_address": rule.get("destination_address", "any"),
+            "destination_port": rule.get("destination_port", "any"),
+            
+            # Metadata
+            "api_version": rule.get("api_version", ""),
+            "raw_type": rule.get("raw_type", ""),
+        }
     
     def _format_rule_details(self, rule: Dict[str, Any]) -> Dict[str, Any]:
         """Format firewall rule data for detailed view (AI-friendly).
@@ -548,6 +695,9 @@ class ListTrafficRoutesTool(BaseTool):
     description = "List all traffic routing rules"
     category = "security"
     
+    # Fields to include in concise response format
+    CONCISE_FIELDS = ["id", "name", "enabled", "type", "destination_network"]
+    
     input_schema = {
         "type": "object",
         "properties": {
@@ -568,6 +718,12 @@ class ListTrafficRoutesTool(BaseTool):
                 "minimum": 1,
                 "maximum": 500,
                 "default": 50
+            },
+            "response_format": {
+                "type": "string",
+                "enum": ["detailed", "concise"],
+                "description": "Response format: 'detailed' for all fields, 'concise' for essential fields only",
+                "default": "detailed"
             }
         }
     }
@@ -578,6 +734,7 @@ class ListTrafficRoutesTool(BaseTool):
         enabled_only: bool = False,
         page: int = 1,
         page_size: int = 50,
+        response_format: str = "detailed",
         **kwargs: Any
     ) -> Dict[str, Any]:
         """Execute the list traffic routes tool.
@@ -587,24 +744,30 @@ class ListTrafficRoutesTool(BaseTool):
             enabled_only: Show only enabled routes if True
             page: Page number for pagination
             page_size: Number of routes per page
+            response_format: "detailed" or "concise" response format
             **kwargs: Additional arguments (ignored)
         
         Returns:
             Formatted list of traffic routes with pagination info
         """
         try:
-            # Fetch routing rules from UniFi controller
+            # Fetch routing rules using endpoint routing for v2 API support
             logger.info(
                 f"Fetching traffic routes (enabled_only={enabled_only}, "
-                f"page={page}, page_size={page_size})"
+                f"page={page}, page_size={page_size}, format={response_format})"
             )
             
-            response = await unifi_client.get(f"/api/s/{{site}}/rest/routing")
+            # Use get_security_data for automatic endpoint routing and normalization
+            result = await unifi_client.get_security_data("traffic_routes")
             
-            # Extract route data from response
-            routes = response.get("data", [])
+            # Extract normalized route data
+            routes = result.get("data", [])
+            api_version = result.get("api_version", "v1")
             
-            logger.debug(f"Retrieved {len(routes)} traffic routes from controller")
+            logger.debug(
+                f"Retrieved {len(routes)} traffic routes from controller "
+                f"(api_version={api_version})"
+            )
             
             # Filter by enabled status if specified
             if enabled_only:
@@ -612,8 +775,9 @@ class ListTrafficRoutesTool(BaseTool):
                 logger.debug(f"Filtered to {len(routes)} enabled routes")
             
             # Format routes for AI consumption (summary view)
+            # Data is already normalized, just extract summary fields
             formatted_routes = [
-                self._format_route_summary(route)
+                self._format_normalized_route_summary(route)
                 for route in routes
             ]
             
@@ -625,12 +789,26 @@ class ListTrafficRoutesTool(BaseTool):
                 f"(page {page}/{(total + page_size - 1) // page_size}, total={total})"
             )
             
-            return self.format_list(
+            # Use format_list_with_truncation for response format support
+            response = self.format_list_with_truncation(
                 items=paginated_routes,
                 total=total,
                 page=page,
-                page_size=page_size
+                page_size=page_size,
+                response_format=response_format,
+                concise_fields=self.CONCISE_FIELDS
             )
+            
+            # Add api_version to response metadata
+            response["api_version"] = api_version
+            response["controller_type"] = result.get("controller_type", "unknown")
+            
+            return response
+        
+        except EndpointError as e:
+            # Handle v2 endpoint failures gracefully with clear error messages
+            logger.error(f"Failed to list traffic routes: {e}", exc_info=True)
+            raise _handle_endpoint_error(e, "traffic routes")
         
         except Exception as e:
             logger.error(f"Failed to list traffic routes: {e}", exc_info=True)
@@ -644,6 +822,29 @@ class ListTrafficRoutesTool(BaseTool):
                     "Check server logs for details"
                 ]
             )
+    
+    def _format_normalized_route_summary(self, route: Dict[str, Any]) -> Dict[str, Any]:
+        """Format normalized traffic route data for summary view (AI-friendly).
+        
+        Works with normalized route data from ResponseNormalizer.
+        
+        Args:
+            route: Normalized route data
+        
+        Returns:
+            Formatted route summary
+        """
+        return {
+            "id": route.get("id", ""),
+            "name": route.get("name", "Unnamed Route"),
+            "enabled": route.get("enabled", False),
+            "type": route.get("route_type", "static"),
+            "destination_network": route.get("destination_network", ""),
+            "next_hop": route.get("next_hop", ""),
+            "distance": route.get("distance", 0),
+            "interface": route.get("interface", ""),
+            "api_version": route.get("api_version", ""),
+        }
     
     def _format_route_summary(self, route: Dict[str, Any]) -> Dict[str, Any]:
         """Format traffic route data for summary view (AI-friendly).
@@ -711,11 +912,13 @@ class GetRouteDetailsTool(BaseTool):
             Formatted route details
         """
         try:
-            # Fetch all routes (UniFi doesn't have a single route endpoint)
+            # Fetch all routes using endpoint routing for v2 API support
             logger.info(f"Fetching details for traffic route: {route_id}")
             
-            response = await unifi_client.get(f"/api/s/{{site}}/rest/routing")
-            routes = response.get("data", [])
+            # Use get_security_data for automatic endpoint routing and normalization
+            result = await unifi_client.get_security_data("traffic_routes")
+            routes = result.get("data", [])
+            api_version = result.get("api_version", "v1")
             
             # Find the specific route by ID
             route = self._find_route(routes, route_id)
@@ -732,19 +935,33 @@ class GetRouteDetailsTool(BaseTool):
                     ]
                 )
             
-            # Format route details for AI consumption
-            formatted_route = self._format_route_details(route)
+            # Format route details for AI consumption (data is already normalized)
+            formatted_route = self._format_normalized_route_details(route)
             
-            logger.info(f"Retrieved details for traffic route: {formatted_route['name']}")
+            logger.info(
+                f"Retrieved details for traffic route: {formatted_route['name']} "
+                f"(api_version={api_version})"
+            )
             
-            return self.format_detail(
+            response = self.format_detail(
                 item=formatted_route,
                 item_type="traffic_route"
             )
+            
+            # Add api_version to response metadata
+            response["api_version"] = api_version
+            response["controller_type"] = result.get("controller_type", "unknown")
+            
+            return response
         
         except ToolError:
             # Re-raise tool errors
             raise
+        
+        except EndpointError as e:
+            # Handle v2 endpoint failures gracefully with clear error messages
+            logger.error(f"Failed to get route details: {e}", exc_info=True)
+            raise _handle_endpoint_error(e, "route details")
         
         except Exception as e:
             logger.error(f"Failed to get route details: {e}", exc_info=True)
@@ -767,7 +984,7 @@ class GetRouteDetailsTool(BaseTool):
         """Find a route by ID.
         
         Args:
-            routes: List of route dictionaries
+            routes: List of route dictionaries (normalized or raw)
             route_id: Route ID to search for
         
         Returns:
@@ -776,11 +993,40 @@ class GetRouteDetailsTool(BaseTool):
         route_id_lower = route_id.lower()
         
         for route in routes:
-            # Check ID
-            if route.get("_id", "").lower() == route_id_lower:
+            # Check normalized 'id' field first, then legacy '_id' field
+            route_id_value = route.get("id", route.get("_id", ""))
+            if str(route_id_value).lower() == route_id_lower:
                 return route
         
         return None
+    
+    def _format_normalized_route_details(self, route: Dict[str, Any]) -> Dict[str, Any]:
+        """Format normalized route data for detailed view (AI-friendly).
+        
+        Works with normalized route data from ResponseNormalizer.
+        
+        Args:
+            route: Normalized route data
+        
+        Returns:
+            Formatted route details
+        """
+        return {
+            # Basic information
+            "id": route.get("id", ""),
+            "name": route.get("name", "Unnamed Route"),
+            "enabled": route.get("enabled", False),
+            "type": route.get("route_type", "static"),
+            
+            # Route configuration
+            "destination_network": route.get("destination_network", ""),
+            "next_hop": route.get("next_hop", ""),
+            "distance": route.get("distance", 0),
+            "interface": route.get("interface", ""),
+            
+            # Metadata
+            "api_version": route.get("api_version", ""),
+        }
     
     def _format_route_details(self, route: Dict[str, Any]) -> Dict[str, Any]:
         """Format route data for detailed view (AI-friendly).
@@ -872,23 +1118,13 @@ class GetIPSStatusTool(BaseTool):
                 f"alert_limit={alert_limit})"
             )
             
-            # Fetch IPS/IDS settings
-            settings_response = await unifi_client.get(
-                f"/api/s/{{site}}/rest/setting/ips"
-            )
-            settings = settings_response.get("data", [])
+            # Use get_security_data for automatic endpoint routing and normalization
+            result = await unifi_client.get_security_data("ips_status")
+            ips_data = result.get("data", {})
+            api_version = result.get("api_version", "v1")
             
-            # Get the IPS configuration (usually first item)
-            ips_config = settings[0] if settings else {}
-            
-            # Fetch IPS statistics
-            stats_response = await unifi_client.get(
-                f"/api/s/{{site}}/stat/ips/event"
-            )
-            stats = stats_response.get("data", [])
-            
-            # Format IPS status
-            ips_status = self._format_ips_status(ips_config, stats)
+            # Format IPS status from normalized data
+            ips_status = self._format_normalized_ips_status(ips_data)
             
             # Fetch recent alerts if requested
             if include_alerts:
@@ -917,13 +1153,25 @@ class GetIPSStatusTool(BaseTool):
             
             logger.info(
                 f"Retrieved IPS status: enabled={ips_status['enabled']}, "
-                f"alerts={ips_status.get('total_alerts', 0)}"
+                f"alerts={ips_status.get('total_alerts', 0)} "
+                f"(api_version={api_version})"
             )
             
-            return self.format_detail(
+            response = self.format_detail(
                 item=ips_status,
                 item_type="ips_status"
             )
+            
+            # Add api_version to response metadata
+            response["api_version"] = api_version
+            response["controller_type"] = result.get("controller_type", "unknown")
+            
+            return response
+        
+        except EndpointError as e:
+            # Handle v2 endpoint failures gracefully with clear error messages
+            logger.error(f"Failed to get IPS status: {e}", exc_info=True)
+            raise _handle_endpoint_error(e, "IPS status")
         
         except Exception as e:
             logger.error(f"Failed to get IPS status: {e}", exc_info=True)
@@ -937,6 +1185,39 @@ class GetIPSStatusTool(BaseTool):
                     "Check server logs for details"
                 ]
             )
+    
+    def _format_normalized_ips_status(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Format normalized IPS status for AI consumption.
+        
+        Works with normalized IPS data from ResponseNormalizer.
+        
+        Args:
+            data: Normalized IPS status data
+        
+        Returns:
+            Formatted IPS status
+        """
+        # Get enabled state - ensure it correctly reflects the state on UniFi OS
+        enabled = data.get("enabled", False)
+        enabled_display = data.get("enabled_display", "yes" if enabled else "no")
+        
+        status = {
+            # Basic configuration - ensure enabled field correctly reflects state
+            "enabled": enabled_display,
+            "enabled_bool": enabled,  # Keep boolean for programmatic use
+            
+            # Protection mode
+            "protection_mode": data.get("protection_mode", "unknown"),
+            
+            # Threat statistics
+            "threat_statistics": data.get("threat_statistics", {}),
+            
+            # API metadata
+            "api_version": data.get("api_version", ""),
+            "controller_type": data.get("controller_type", ""),
+        }
+        
+        return status
     
     def _format_ips_status(
         self,
@@ -1092,6 +1373,9 @@ class ListPortForwardsTool(BaseTool):
     description = "List all port forwarding rules"
     category = "security"
     
+    # Fields to include in concise response format
+    CONCISE_FIELDS = ["id", "name", "enabled", "protocol", "destination_ip", "destination_port"]
+    
     input_schema = {
         "type": "object",
         "properties": {
@@ -1112,6 +1396,12 @@ class ListPortForwardsTool(BaseTool):
                 "minimum": 1,
                 "maximum": 500,
                 "default": 50
+            },
+            "response_format": {
+                "type": "string",
+                "enum": ["detailed", "concise"],
+                "description": "Response format: 'detailed' for all fields, 'concise' for essential fields only",
+                "default": "detailed"
             }
         }
     }
@@ -1122,6 +1412,7 @@ class ListPortForwardsTool(BaseTool):
         enabled_only: bool = False,
         page: int = 1,
         page_size: int = 50,
+        response_format: str = "detailed",
         **kwargs: Any
     ) -> Dict[str, Any]:
         """Execute the list port forwards tool.
@@ -1131,24 +1422,30 @@ class ListPortForwardsTool(BaseTool):
             enabled_only: Show only enabled port forwards if True
             page: Page number for pagination
             page_size: Number of port forwards per page
+            response_format: "detailed" or "concise" response format
             **kwargs: Additional arguments (ignored)
         
         Returns:
             Formatted list of port forwards with pagination info
         """
         try:
-            # Fetch port forwarding rules from UniFi controller
+            # Fetch port forwarding rules using endpoint routing for v2 API support
             logger.info(
                 f"Fetching port forwards (enabled_only={enabled_only}, "
-                f"page={page}, page_size={page_size})"
+                f"page={page}, page_size={page_size}, format={response_format})"
             )
             
-            response = await unifi_client.get(f"/api/s/{{site}}/rest/portforward")
+            # Use get_security_data for automatic endpoint routing and normalization
+            result = await unifi_client.get_security_data("port_forwards")
             
-            # Extract port forward data from response
-            forwards = response.get("data", [])
+            # Extract normalized port forward data
+            forwards = result.get("data", [])
+            api_version = result.get("api_version", "v1")
             
-            logger.debug(f"Retrieved {len(forwards)} port forwards from controller")
+            logger.debug(
+                f"Retrieved {len(forwards)} port forwards from controller "
+                f"(api_version={api_version})"
+            )
             
             # Filter by enabled status if specified
             if enabled_only:
@@ -1156,8 +1453,9 @@ class ListPortForwardsTool(BaseTool):
                 logger.debug(f"Filtered to {len(forwards)} enabled port forwards")
             
             # Format port forwards for AI consumption (summary view)
+            # Data is already normalized, just extract summary fields
             formatted_forwards = [
-                self._format_forward_summary(forward)
+                self._format_normalized_forward_summary(forward)
                 for forward in forwards
             ]
             
@@ -1169,12 +1467,26 @@ class ListPortForwardsTool(BaseTool):
                 f"(page {page}/{(total + page_size - 1) // page_size}, total={total})"
             )
             
-            return self.format_list(
+            # Use format_list_with_truncation for response format support
+            response = self.format_list_with_truncation(
                 items=paginated_forwards,
                 total=total,
                 page=page,
-                page_size=page_size
+                page_size=page_size,
+                response_format=response_format,
+                concise_fields=self.CONCISE_FIELDS
             )
+            
+            # Add api_version to response metadata
+            response["api_version"] = api_version
+            response["controller_type"] = result.get("controller_type", "unknown")
+            
+            return response
+        
+        except EndpointError as e:
+            # Handle v2 endpoint failures gracefully with clear error messages
+            logger.error(f"Failed to list port forwards: {e}", exc_info=True)
+            raise _handle_endpoint_error(e, "port forwards")
         
         except Exception as e:
             logger.error(f"Failed to list port forwards: {e}", exc_info=True)
@@ -1188,6 +1500,29 @@ class ListPortForwardsTool(BaseTool):
                     "Check server logs for details"
                 ]
             )
+    
+    def _format_normalized_forward_summary(self, forward: Dict[str, Any]) -> Dict[str, Any]:
+        """Format normalized port forward data for summary view (AI-friendly).
+        
+        Works with normalized port forward data from ResponseNormalizer.
+        
+        Args:
+            forward: Normalized port forward data
+        
+        Returns:
+            Formatted port forward summary
+        """
+        return {
+            "id": forward.get("id", ""),
+            "name": forward.get("name", "Unnamed Port Forward"),
+            "enabled": forward.get("enabled", False),
+            "protocol": forward.get("protocol", "TCP"),
+            "source_ip": forward.get("source_ip", "any"),
+            "destination_ip": forward.get("destination_ip", ""),
+            "destination_port": forward.get("destination_port", ""),
+            "external_port": forward.get("source_port", ""),
+            "api_version": forward.get("api_version", ""),
+        }
     
     def _format_forward_summary(self, forward: Dict[str, Any]) -> Dict[str, Any]:
         """Format port forward data for summary view (AI-friendly).
@@ -1273,11 +1608,13 @@ class GetPortForwardDetailsTool(BaseTool):
             Formatted port forward details
         """
         try:
-            # Fetch all port forwards (UniFi doesn't have a single forward endpoint)
+            # Fetch all port forwards using endpoint routing for v2 API support
             logger.info(f"Fetching details for port forward: {forward_id}")
             
-            response = await unifi_client.get(f"/api/s/{{site}}/rest/portforward")
-            forwards = response.get("data", [])
+            # Use get_security_data for automatic endpoint routing and normalization
+            result = await unifi_client.get_security_data("port_forwards")
+            forwards = result.get("data", [])
+            api_version = result.get("api_version", "v1")
             
             # Find the specific port forward by ID
             forward = self._find_forward(forwards, forward_id)
@@ -1294,19 +1631,33 @@ class GetPortForwardDetailsTool(BaseTool):
                     ]
                 )
             
-            # Format port forward details for AI consumption
-            formatted_forward = self._format_forward_details(forward)
+            # Format port forward details for AI consumption (data is already normalized)
+            formatted_forward = self._format_normalized_forward_details(forward)
             
-            logger.info(f"Retrieved details for port forward: {formatted_forward['name']}")
+            logger.info(
+                f"Retrieved details for port forward: {formatted_forward['name']} "
+                f"(api_version={api_version})"
+            )
             
-            return self.format_detail(
+            response = self.format_detail(
                 item=formatted_forward,
                 item_type="port_forward"
             )
+            
+            # Add api_version to response metadata
+            response["api_version"] = api_version
+            response["controller_type"] = result.get("controller_type", "unknown")
+            
+            return response
         
         except ToolError:
             # Re-raise tool errors
             raise
+        
+        except EndpointError as e:
+            # Handle v2 endpoint failures gracefully with clear error messages
+            logger.error(f"Failed to get port forward details: {e}", exc_info=True)
+            raise _handle_endpoint_error(e, "port forward details")
         
         except Exception as e:
             logger.error(f"Failed to get port forward details: {e}", exc_info=True)
@@ -1329,7 +1680,7 @@ class GetPortForwardDetailsTool(BaseTool):
         """Find a port forward by ID.
         
         Args:
-            forwards: List of port forward dictionaries
+            forwards: List of port forward dictionaries (normalized or raw)
             forward_id: Port forward ID to search for
         
         Returns:
@@ -1338,11 +1689,42 @@ class GetPortForwardDetailsTool(BaseTool):
         forward_id_lower = forward_id.lower()
         
         for forward in forwards:
-            # Check ID
-            if forward.get("_id", "").lower() == forward_id_lower:
+            # Check normalized 'id' field first, then legacy '_id' field
+            forward_id_value = forward.get("id", forward.get("_id", ""))
+            if str(forward_id_value).lower() == forward_id_lower:
                 return forward
         
         return None
+    
+    def _format_normalized_forward_details(self, forward: Dict[str, Any]) -> Dict[str, Any]:
+        """Format normalized port forward data for detailed view (AI-friendly).
+        
+        Works with normalized port forward data from ResponseNormalizer.
+        
+        Args:
+            forward: Normalized port forward data
+        
+        Returns:
+            Formatted port forward details
+        """
+        return {
+            # Basic information
+            "id": forward.get("id", ""),
+            "name": forward.get("name", "Unnamed Port Forward"),
+            "enabled": forward.get("enabled", False),
+            
+            # Protocol and ports
+            "protocol": forward.get("protocol", "TCP"),
+            "external_port": forward.get("source_port", ""),
+            "destination_ip": forward.get("destination_ip", ""),
+            "destination_port": forward.get("destination_port", ""),
+            
+            # Source restrictions
+            "source_ip": forward.get("source_ip", "any"),
+            
+            # Metadata
+            "api_version": forward.get("api_version", ""),
+        }
     
     def _format_forward_details(self, forward: Dict[str, Any]) -> Dict[str, Any]:
         """Format port forward data for detailed view (AI-friendly).

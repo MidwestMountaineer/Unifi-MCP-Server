@@ -7,12 +7,16 @@ This module provides tools to support network infrastructure migration:
 
 These tools help with planning and validating network migrations,
 particularly for the homelab network infrastructure migration project.
+
+Updated to support v2 API endpoints on UniFi OS devices while maintaining
+backward compatibility with traditional controllers.
 """
 
 from typing import Any, Dict, List, Optional
 
 from ..tools.base import BaseTool, ToolError
 from ..unifi_client import UniFiClient
+from ..api import ControllerType
 from ..utils.logging import get_logger
 
 
@@ -284,9 +288,18 @@ class VerifyVLANConnectivityTool(BaseTool):
                     ]
                 )
             
-            # Fetch firewall rules
-            rules_response = await unifi_client.get(f"/api/s/{{site}}/rest/firewallrule")
-            firewall_rules = rules_response.get("data", [])
+            # Fetch firewall rules using endpoint routing for v2 API support
+            try:
+                result = await unifi_client.get_security_data("firewall_rules")
+                firewall_rules = result.get("data", [])
+                api_version = result.get("api_version", "v1")
+                logger.debug(f"Retrieved firewall rules via endpoint routing (API {api_version})")
+            except Exception as e:
+                logger.warning(f"Failed to get firewall rules via routing, falling back: {e}")
+                # Fallback to direct endpoint
+                rules_response = await unifi_client.get(f"/api/s/{{site}}/rest/firewallrule")
+                firewall_rules = rules_response.get("data", [])
+                api_version = "v1"
             
             # Analyze connectivity
             connectivity_result = self._analyze_connectivity(
@@ -294,6 +307,9 @@ class VerifyVLANConnectivityTool(BaseTool):
                 dest_network,
                 firewall_rules
             )
+            
+            # Add API version to result
+            connectivity_result["api_version"] = api_version
             
             logger.info(
                 f"VLAN connectivity check complete: "
@@ -555,7 +571,7 @@ class ExportConfigurationTool(BaseTool):
             **kwargs: Additional arguments (ignored)
         
         Returns:
-            Exported configuration data
+            Exported configuration data with controller_type and api_version metadata
         """
         try:
             logger.info("Exporting network configuration")
@@ -566,8 +582,17 @@ class ExportConfigurationTool(BaseTool):
                     "handle with care!"
                 )
             
+            # Get controller type for metadata
+            controller_type = unifi_client.controller_type
+            controller_type_str = controller_type.value if controller_type else "unknown"
+            
+            # Track API versions used for each section
+            api_versions_used = {}
+            
             export_data = {
                 "export_timestamp": self._get_timestamp(),
+                "controller_type": controller_type_str,
+                "api_version": "v2" if controller_type == ControllerType.UNIFI_OS else "v1",
                 "export_options": {
                     "include_credentials": include_credentials,
                     "include_networks": include_networks,
@@ -579,7 +604,7 @@ class ExportConfigurationTool(BaseTool):
                 "configuration": {}
             }
             
-            # Export networks
+            # Export networks (uses standard endpoint, not security data)
             if include_networks:
                 networks_response = await unifi_client.get(
                     f"/api/s/{{site}}/rest/networkconf"
@@ -589,45 +614,88 @@ class ExportConfigurationTool(BaseTool):
                     self._sanitize_config(net, include_credentials)
                     for net in networks
                 ]
+                api_versions_used["networks"] = "v1"  # Networks use standard endpoint
                 logger.debug(f"Exported {len(networks)} networks")
             
-            # Export firewall rules
+            # Export firewall rules using endpoint routing
             if include_firewall_rules:
-                rules_response = await unifi_client.get(
-                    f"/api/s/{{site}}/rest/firewallrule"
-                )
-                rules = rules_response.get("data", [])
-                export_data["configuration"]["firewall_rules"] = [
-                    self._sanitize_config(rule, include_credentials)
-                    for rule in rules
-                ]
-                logger.debug(f"Exported {len(rules)} firewall rules")
+                try:
+                    result = await unifi_client.get_security_data("firewall_rules")
+                    rules = result.get("data", [])
+                    api_version = result.get("api_version", "v1")
+                    export_data["configuration"]["firewall_rules"] = [
+                        self._sanitize_config(rule, include_credentials)
+                        for rule in rules
+                    ]
+                    api_versions_used["firewall_rules"] = api_version
+                    logger.debug(f"Exported {len(rules)} firewall rules (API {api_version})")
+                except Exception as e:
+                    logger.warning(f"Failed to export firewall rules via routing, falling back: {e}")
+                    # Fallback to direct endpoint
+                    rules_response = await unifi_client.get(
+                        f"/api/s/{{site}}/rest/firewallrule"
+                    )
+                    rules = rules_response.get("data", [])
+                    export_data["configuration"]["firewall_rules"] = [
+                        self._sanitize_config(rule, include_credentials)
+                        for rule in rules
+                    ]
+                    api_versions_used["firewall_rules"] = "v1"
+                    logger.debug(f"Exported {len(rules)} firewall rules (fallback)")
             
-            # Export routing rules
+            # Export routing rules using endpoint routing
             if include_routing:
-                routing_response = await unifi_client.get(
-                    f"/api/s/{{site}}/rest/routing"
-                )
-                routes = routing_response.get("data", [])
-                export_data["configuration"]["routing_rules"] = [
-                    self._sanitize_config(route, include_credentials)
-                    for route in routes
-                ]
-                logger.debug(f"Exported {len(routes)} routing rules")
+                try:
+                    result = await unifi_client.get_security_data("traffic_routes")
+                    routes = result.get("data", [])
+                    api_version = result.get("api_version", "v1")
+                    export_data["configuration"]["routing_rules"] = [
+                        self._sanitize_config(route, include_credentials)
+                        for route in routes
+                    ]
+                    api_versions_used["routing_rules"] = api_version
+                    logger.debug(f"Exported {len(routes)} routing rules (API {api_version})")
+                except Exception as e:
+                    logger.warning(f"Failed to export routing rules via routing, falling back: {e}")
+                    # Fallback to direct endpoint
+                    routing_response = await unifi_client.get(
+                        f"/api/s/{{site}}/rest/routing"
+                    )
+                    routes = routing_response.get("data", [])
+                    export_data["configuration"]["routing_rules"] = [
+                        self._sanitize_config(route, include_credentials)
+                        for route in routes
+                    ]
+                    api_versions_used["routing_rules"] = "v1"
+                    logger.debug(f"Exported {len(routes)} routing rules (fallback)")
             
-            # Export port forwards
+            # Export port forwards using endpoint routing
             if include_port_forwards:
-                forwards_response = await unifi_client.get(
-                    f"/api/s/{{site}}/rest/portforward"
-                )
-                forwards = forwards_response.get("data", [])
-                export_data["configuration"]["port_forwards"] = [
-                    self._sanitize_config(forward, include_credentials)
-                    for forward in forwards
-                ]
-                logger.debug(f"Exported {len(forwards)} port forwards")
+                try:
+                    result = await unifi_client.get_security_data("port_forwards")
+                    forwards = result.get("data", [])
+                    api_version = result.get("api_version", "v1")
+                    export_data["configuration"]["port_forwards"] = [
+                        self._sanitize_config(forward, include_credentials)
+                        for forward in forwards
+                    ]
+                    api_versions_used["port_forwards"] = api_version
+                    logger.debug(f"Exported {len(forwards)} port forwards (API {api_version})")
+                except Exception as e:
+                    logger.warning(f"Failed to export port forwards via routing, falling back: {e}")
+                    # Fallback to direct endpoint
+                    forwards_response = await unifi_client.get(
+                        f"/api/s/{{site}}/rest/portforward"
+                    )
+                    forwards = forwards_response.get("data", [])
+                    export_data["configuration"]["port_forwards"] = [
+                        self._sanitize_config(forward, include_credentials)
+                        for forward in forwards
+                    ]
+                    api_versions_used["port_forwards"] = "v1"
+                    logger.debug(f"Exported {len(forwards)} port forwards (fallback)")
             
-            # Export WLANs
+            # Export WLANs (uses standard endpoint, not security data)
             if include_wlans:
                 wlans_response = await unifi_client.get(
                     f"/api/s/{{site}}/rest/wlanconf"
@@ -637,9 +705,15 @@ class ExportConfigurationTool(BaseTool):
                     self._sanitize_config(wlan, include_credentials)
                     for wlan in wlans
                 ]
+                api_versions_used["wlans"] = "v1"  # WLANs use standard endpoint
                 logger.debug(f"Exported {len(wlans)} WLANs")
             
-            logger.info("Configuration export complete")
+            # Add API versions used to metadata
+            export_data["api_versions_used"] = api_versions_used
+            
+            logger.info(
+                f"Configuration export complete (controller_type={controller_type_str})"
+            )
             
             return self.format_success(
                 data=export_data,

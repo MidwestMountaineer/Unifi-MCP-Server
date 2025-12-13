@@ -50,17 +50,19 @@ class TestUniFiMCPServer:
     """Tests for UniFiMCPServer class."""
     
     def test_server_initialization(self, mock_config, mock_unifi_client):
-        """Test server initializes correctly."""
+        """Test server initializes correctly with auto-registered tools."""
         server = UniFiMCPServer(mock_config)
         
         assert server.config == mock_config
         assert server.server is not None
         assert server.tool_registry is not None
-        assert server.tool_registry.get_tool_count() == 0
+        # Server auto-registers 25 tools on initialization
+        assert server.tool_registry.get_tool_count() == 25
     
     def test_register_tool(self, mock_config, mock_unifi_client):
-        """Test tool registration."""
+        """Test tool registration adds to existing tools."""
         server = UniFiMCPServer(mock_config)
+        initial_count = server.tool_registry.get_tool_count()
         
         async def test_handler(client, **kwargs):
             return "test result"
@@ -72,15 +74,20 @@ class TestUniFiMCPServer:
             handler=test_handler,
         )
         
-        assert server.tool_registry.get_tool_count() == 1
+        assert server.tool_registry.get_tool_count() == initial_count + 1
         assert "unifi_test_tool" in server.tool_registry._tools
     
-    def test_get_available_tools_empty(self, mock_config, mock_unifi_client):
-        """Test getting available tools when none are registered."""
+    def test_get_available_tools_returns_registered_tools(self, mock_config, mock_unifi_client):
+        """Test getting available tools returns auto-registered tools."""
         server = UniFiMCPServer(mock_config)
         tools = server.tool_registry.get_tool_list()
         
-        assert tools == []
+        # Server auto-registers 25 tools
+        assert len(tools) == 25
+        # Verify some expected tool names
+        tool_names = [t.name for t in tools]
+        assert "unifi_list_devices" in tool_names
+        assert "unifi_list_clients" in tool_names
     
     @pytest.mark.asyncio
     async def test_connect(self, mock_config, mock_unifi_client):
@@ -126,7 +133,7 @@ class TestMCPProtocolHandlers:
     
     @pytest.mark.asyncio
     async def test_list_tools_handler(self, mock_config, mock_unifi_client):
-        """Test tools/list handler returns empty list initially."""
+        """Test tools/list handler returns auto-registered tools."""
         server = UniFiMCPServer(mock_config)
         
         # Get the list_tools handler
@@ -134,7 +141,8 @@ class TestMCPProtocolHandlers:
         tools = server.tool_registry.get_tool_list()
         
         assert isinstance(tools, list)
-        assert len(tools) == 0
+        # Server auto-registers 25 tools
+        assert len(tools) == 25
     
     @pytest.mark.asyncio
     async def test_call_tool_unknown_tool(self, mock_config, mock_unifi_client):
@@ -149,6 +157,7 @@ class TestMCPProtocolHandlers:
     async def test_call_tool_success(self, mock_config, mock_unifi_client):
         """Test successful tool invocation."""
         server = UniFiMCPServer(mock_config)
+        initial_count = server.tool_registry.get_tool_count()
         
         # Register a test tool
         async def test_handler(client, test_param=None):
@@ -161,8 +170,8 @@ class TestMCPProtocolHandlers:
             handler=test_handler,
         )
         
-        # Test that the handler is registered
-        assert server.tool_registry.get_tool_count() == 1
+        # Test that the handler is registered (adds to existing 25 tools)
+        assert server.tool_registry.get_tool_count() == initial_count + 1
         
         # Test calling the handler via registry
         result = await server.tool_registry.invoke(
@@ -201,10 +210,10 @@ class TestServerLifecycle:
         """Test the server initialization sequence."""
         server = UniFiMCPServer(mock_config)
         
-        # Verify initial state
+        # Verify initial state - server auto-registers 25 tools
         assert server.config == mock_config
         assert server.server is not None
-        assert server.tool_registry.get_tool_count() == 0
+        assert server.tool_registry.get_tool_count() == 25
         
         # Verify handlers are registered
         # The handlers are registered in _register_handlers() which is called in __init__

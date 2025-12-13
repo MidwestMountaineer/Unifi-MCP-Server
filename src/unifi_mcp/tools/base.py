@@ -367,6 +367,13 @@ class BaseTool(ABC):
             )
             return error.to_dict()
     
+    # Response format constants
+    RESPONSE_FORMAT_DETAILED = "detailed"
+    RESPONSE_FORMAT_CONCISE = "concise"
+    
+    # Default maximum response size (number of items before truncation)
+    DEFAULT_MAX_RESPONSE_SIZE = 100
+    
     # Output formatting helpers
     
     def format_success(
@@ -663,3 +670,125 @@ class BaseTool(ABC):
                     f"Check the tool documentation for valid {field_name} range"
                 ]
             )
+    
+    # Response format helpers
+    
+    def apply_response_format(
+        self,
+        items: List[Dict[str, Any]],
+        response_format: str = "detailed",
+        concise_fields: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
+        """Apply response format to a list of items.
+        
+        When response_format is "concise", only the specified fields are included.
+        When response_format is "detailed", all fields are included.
+        
+        Args:
+            items: List of item dictionaries
+            response_format: "detailed" or "concise"
+            concise_fields: Fields to include in concise format
+        
+        Returns:
+            Formatted list of items
+        """
+        if response_format == self.RESPONSE_FORMAT_CONCISE and concise_fields:
+            return [
+                {k: v for k, v in item.items() if k in concise_fields}
+                for item in items
+            ]
+        return items
+    
+    def truncate_response(
+        self,
+        items: List[Any],
+        max_size: Optional[int] = None,
+        include_guidance: bool = True
+    ) -> tuple[List[Any], bool, Optional[str]]:
+        """Truncate a list of items if it exceeds the maximum size.
+        
+        Args:
+            items: List of items to potentially truncate
+            max_size: Maximum number of items (defaults to DEFAULT_MAX_RESPONSE_SIZE)
+            include_guidance: Whether to include guidance message when truncated
+        
+        Returns:
+            Tuple of (truncated items, was_truncated, guidance_message)
+        """
+        max_size = max_size or self.DEFAULT_MAX_RESPONSE_SIZE
+        
+        if len(items) <= max_size:
+            return items, False, None
+        
+        truncated_items = items[:max_size]
+        guidance = None
+        
+        if include_guidance:
+            guidance = (
+                f"Response truncated to {max_size} items (total: {len(items)}). "
+                f"Use pagination (page, page_size) or filtering parameters "
+                f"for more targeted queries."
+            )
+        
+        return truncated_items, True, guidance
+    
+    def format_list_with_truncation(
+        self,
+        items: List[Any],
+        total: Optional[int] = None,
+        page: Optional[int] = None,
+        page_size: Optional[int] = None,
+        max_size: Optional[int] = None,
+        response_format: str = "detailed",
+        concise_fields: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """Format a list result with optional truncation and response format.
+        
+        This method combines pagination info, truncation, and response format
+        into a single formatted response.
+        
+        Args:
+            items: List of items
+            total: Total number of items (if paginated)
+            page: Current page number (if paginated)
+            page_size: Items per page (if paginated)
+            max_size: Maximum items before truncation
+            response_format: "detailed" or "concise"
+            concise_fields: Fields to include in concise format
+        
+        Returns:
+            Formatted list response with truncation info if applicable
+        """
+        # Apply response format first
+        formatted_items = self.apply_response_format(
+            items, response_format, concise_fields
+        )
+        
+        # Apply truncation
+        truncated_items, was_truncated, guidance = self.truncate_response(
+            formatted_items, max_size
+        )
+        
+        result = {
+            "success": True,
+            "data": truncated_items,
+            "count": len(truncated_items),
+            "response_format": response_format
+        }
+        
+        if total is not None:
+            result["total"] = total
+        
+        if page is not None:
+            result["page"] = page
+        
+        if page_size is not None:
+            result["page_size"] = page_size
+        
+        if was_truncated:
+            result["truncated"] = True
+            result["truncated_from"] = len(items)
+            if guidance:
+                result["guidance"] = guidance
+        
+        return result
