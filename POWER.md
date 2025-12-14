@@ -59,7 +59,14 @@ Choose your controller type below:
 4. Select **Read Only** for security
 5. Copy the key (shown only once!)
 
-**Step 2: Configure MCP Server**
+**Step 2: Install as Kiro Power (Recommended)**
+
+1. Open Kiro's Powers panel
+2. Click "Add Custom Power" → "Import from local folder"
+3. Point to your local clone of this repository
+4. The power will auto-configure with your credentials
+
+**Alternative: Manual MCP Configuration**
 
 Add to `.kiro/settings/mcp.json`:
 
@@ -67,17 +74,17 @@ Add to `.kiro/settings/mcp.json`:
 {
   "mcpServers": {
     "unifi": {
-      "command": "uvx",
-      "args": ["--from", "git+https://github.com/MidwestMountaineer/Unifi-MCP-Server.git", "unifi-mcp-server"],
+      "command": "python",
+      "args": ["-m", "unifi_mcp"],
+      "cwd": "/path/to/unifi-mcp-server",
       "env": {
         "UNIFI_HOST": "192.168.1.1",
-        "UNIFI_PORT": "443",
         "UNIFI_API_KEY": "your-api-key-here",
         "UNIFI_SITE": "default",
         "UNIFI_VERIFY_SSL": "false"
       },
       "disabled": false,
-      "autoApprove": ["unifi_list_devices", "unifi_list_clients", "unifi_get_system_health"]
+      "autoApprove": ["unifi_list_*", "unifi_get_*"]
     }
   }
 }
@@ -110,8 +117,9 @@ Add to `.kiro/settings/mcp.json`:
 {
   "mcpServers": {
     "unifi": {
-      "command": "uvx",
-      "args": ["--from", "git+https://github.com/MidwestMountaineer/Unifi-MCP-Server.git", "unifi-mcp-server"],
+      "command": "python",
+      "args": ["-m", "unifi_mcp"],
+      "cwd": "/path/to/unifi-mcp-server",
       "env": {
         "UNIFI_HOST": "192.168.1.100",
         "UNIFI_PORT": "8443",
@@ -121,7 +129,7 @@ Add to `.kiro/settings/mcp.json`:
         "UNIFI_VERIFY_SSL": "false"
       },
       "disabled": false,
-      "autoApprove": ["unifi_list_devices", "unifi_list_clients", "unifi_get_system_health"]
+      "autoApprove": ["unifi_list_*", "unifi_get_*"]
     }
   }
 }
