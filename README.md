@@ -159,7 +159,67 @@ For traditional UniFi Controllers (not UniFi OS):
 
 ---
 
-## 🔌 Integration with Kiro
+## ⚡ Kiro Power Installation (Recommended)
+
+The easiest way to use this MCP server is as a **Kiro Power** - a packaged bundle with documentation, steering files, and pre-configured MCP server.
+
+### What You Get
+
+- **25 production-ready MCP tools** for network management
+- **5 workflow steering files** for guided operations:
+  - `monitoring.md` - Health checks, bandwidth analysis, alerts
+  - `security.md` - Firewall audits, IPS review, security best practices
+  - `troubleshooting.md` - Connection diagnostics, error resolution
+  - `vlan.md` - VLAN design patterns, segmentation guidance
+  - `workflows.md` - Multi-step automation recipes
+- **Automatic activation** when you mention "unifi", "network", "firewall", "vlan", etc.
+- **Copy-paste configuration** templates
+
+### Installation Steps
+
+1. **Open Kiro** and go to the Powers panel
+
+2. **Click "Add power from GitHub"**
+
+3. **Enter the repository URL:**
+   ```
+   https://github.com/MidwestMountaineer/Unifi-MCP-Server
+   ```
+
+4. **Configure your credentials** in `.kiro/settings/mcp.json`:
+   ```json
+   {
+     "mcpServers": {
+       "unifi": {
+         "command": "uvx",
+         "args": ["--from", "git+https://github.com/MidwestMountaineer/Unifi-MCP-Server.git", "unifi-mcp-server"],
+         "env": {
+           "UNIFI_HOST": "192.168.1.1",
+           "UNIFI_API_KEY": "your-api-key-here",
+           "UNIFI_VERIFY_SSL": "false"
+         }
+       }
+     }
+   }
+   ```
+
+5. **Test it!** Ask Kiro: "List all my UniFi devices"
+
+### Power Capabilities
+
+| Workflow | Description | Example Prompt |
+|----------|-------------|----------------|
+| Security Audit | Complete firewall and IPS review | "Perform a security audit of my network" |
+| Health Check | System status and performance | "Check my network health" |
+| Troubleshooting | Guided diagnostics | "My laptop can't reach the NAS" |
+| Documentation | Generate network docs | "Create documentation for my network" |
+| Bandwidth Analysis | Top users and DPI stats | "Who's using all my bandwidth?" |
+
+---
+
+## 🔌 Manual Integration with Kiro
+
+If you prefer manual setup instead of the Power installation:
 
 ### Setup Steps
 
@@ -177,9 +237,8 @@ Edit `.kiro/settings/mcp.json` in your workspace:
 {
   "mcpServers": {
     "unifi": {
-      "command": "python",
-      "args": ["-m", "unifi_mcp"],
-      "cwd": "U:/KiroWorkspace/projects/unifi-mcp-server",
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/MidwestMountaineer/Unifi-MCP-Server.git", "unifi-mcp-server"],
       "env": {
         "UNIFI_HOST": "192.168.1.1",
         "UNIFI_PORT": "443",

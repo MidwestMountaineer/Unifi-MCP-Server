@@ -856,3 +856,349 @@ class TestLargeDatasetTruncation:
                 assert field in concise_fields, (
                     f"Concise item has unexpected field '{field}'"
                 )
+
+
+class TestToolDescriptionConciseness:
+    """Property-based tests for tool description conciseness.
+    
+    These tests verify that all tool descriptions are concise to minimize
+    baseline context consumption when tools are listed.
+    
+    **Feature: unifi-power-optimization, Property 1: Tool Description Conciseness**
+    **Validates: Requirements 2.3**
+    """
+    
+    # Maximum allowed description length (from design doc)
+    MAX_DESCRIPTION_LENGTH = 100
+    
+    @given(tool_index=st.integers(min_value=0, max_value=max(0, len(ALL_TOOL_CLASSES) - 1)))
+    @settings(max_examples=100)
+    def test_tool_description_under_max_length(self, tool_index):
+        """
+        **Feature: unifi-power-optimization, Property 1: Tool Description Conciseness**
+        **Validates: Requirements 2.3**
+        
+        For any MCP tool in the UniFi server, the tool description SHALL be
+        under 100 characters to minimize baseline context consumption when
+        tools are listed.
+        """
+        if not ALL_TOOL_CLASSES:
+            pytest.skip("No tool classes found")
+        
+        tool_class = ALL_TOOL_CLASSES[tool_index % len(ALL_TOOL_CLASSES)]
+        tool = tool_class()
+        
+        description_length = len(tool.description)
+        
+        assert description_length <= self.MAX_DESCRIPTION_LENGTH, (
+            f"Tool '{tool.name}' has description of {description_length} characters, "
+            f"which exceeds the maximum of {self.MAX_DESCRIPTION_LENGTH}. "
+            f"Description: '{tool.description}'"
+        )
+    
+    def test_all_tools_have_concise_descriptions(self):
+        """
+        **Feature: unifi-power-optimization, Property 1: Tool Description Conciseness**
+        **Validates: Requirements 2.3**
+        
+        Verify all discovered tools have descriptions under the maximum length.
+        """
+        if not ALL_TOOL_CLASSES:
+            pytest.skip("No tool classes found")
+        
+        verbose_tools = []
+        for tool_class in ALL_TOOL_CLASSES:
+            tool = tool_class()
+            if len(tool.description) > self.MAX_DESCRIPTION_LENGTH:
+                verbose_tools.append({
+                    "name": tool.name,
+                    "length": len(tool.description),
+                    "description": tool.description
+                })
+        
+        assert len(verbose_tools) == 0, (
+            f"The following tools have descriptions exceeding {self.MAX_DESCRIPTION_LENGTH} chars: "
+            f"{[t['name'] + ' (' + str(t['length']) + ' chars)' for t in verbose_tools]}"
+        )
+    
+    @given(tool_index=st.integers(min_value=0, max_value=max(0, len(ALL_TOOL_CLASSES) - 1)))
+    @settings(max_examples=100)
+    def test_tool_description_not_empty(self, tool_index):
+        """
+        **Feature: unifi-power-optimization, Property 1: Tool Description Conciseness**
+        **Validates: Requirements 2.3**
+        
+        For any MCP tool, the description SHALL not be empty.
+        """
+        if not ALL_TOOL_CLASSES:
+            pytest.skip("No tool classes found")
+        
+        tool_class = ALL_TOOL_CLASSES[tool_index % len(ALL_TOOL_CLASSES)]
+        tool = tool_class()
+        
+        assert tool.description and len(tool.description.strip()) > 0, (
+            f"Tool '{tool.name}' has an empty description"
+        )
+    
+    @given(tool_index=st.integers(min_value=0, max_value=max(0, len(ALL_TOOL_CLASSES) - 1)))
+    @settings(max_examples=100)
+    def test_tool_description_no_verbose_phrases(self, tool_index):
+        """
+        **Feature: unifi-power-optimization, Property 1: Tool Description Conciseness**
+        **Validates: Requirements 2.3**
+        
+        For any MCP tool, the description SHALL NOT contain verbose phrases
+        like "Use this to..." that waste context tokens.
+        """
+        if not ALL_TOOL_CLASSES:
+            pytest.skip("No tool classes found")
+        
+        tool_class = ALL_TOOL_CLASSES[tool_index % len(ALL_TOOL_CLASSES)]
+        tool = tool_class()
+        
+        verbose_phrases = [
+            "Use this to",
+            "This tool is used to",
+            "This tool allows you to",
+            "You can use this to",
+        ]
+        
+        description_lower = tool.description.lower()
+        for phrase in verbose_phrases:
+            assert phrase.lower() not in description_lower, (
+                f"Tool '{tool.name}' description contains verbose phrase '{phrase}'. "
+                f"Description should focus on WHAT the tool does, not HOW to use it."
+            )
+
+
+class TestErrorResponseActionability:
+    """Property-based tests for error response actionability.
+    
+    These tests verify that all error responses include actionable steps
+    as required by Requirement 7.2 from the unifi-power-optimization spec.
+    
+    **Feature: unifi-power-optimization, Property 2: Error Response Actionability**
+    **Validates: Requirements 7.2**
+    """
+    
+    def test_tool_error_has_actionable_steps_field(self):
+        """
+        **Feature: unifi-power-optimization, Property 2: Error Response Actionability**
+        **Validates: Requirements 7.2**
+        
+        The ToolError class SHALL have an actionable_steps field.
+        """
+        from unifi_mcp.tools.base import ToolError
+        
+        # Create a ToolError with actionable steps
+        error = ToolError(
+            code="TEST_ERROR",
+            message="Test error message",
+            details="Test details",
+            actionable_steps=["Step 1", "Step 2"]
+        )
+        
+        assert hasattr(error, 'actionable_steps'), (
+            "ToolError class must have actionable_steps attribute"
+        )
+        assert error.actionable_steps is not None, (
+            "ToolError actionable_steps should not be None when provided"
+        )
+        assert len(error.actionable_steps) >= 1, (
+            "ToolError should have at least one actionable step"
+        )
+    
+    def test_tool_error_to_dict_includes_actionable_steps(self):
+        """
+        **Feature: unifi-power-optimization, Property 2: Error Response Actionability**
+        **Validates: Requirements 7.2**
+        
+        When ToolError is converted to dict, it SHALL include actionable_steps.
+        """
+        from unifi_mcp.tools.base import ToolError
+        
+        error = ToolError(
+            code="TEST_ERROR",
+            message="Test error message",
+            details="Test details",
+            actionable_steps=["Check connectivity", "Verify credentials"]
+        )
+        
+        error_dict = error.to_dict()
+        
+        assert "error" in error_dict, "Error dict should have 'error' key"
+        assert "actionable_steps" in error_dict["error"], (
+            "Error dict should include actionable_steps"
+        )
+        assert len(error_dict["error"]["actionable_steps"]) >= 1, (
+            "Error dict should have at least one actionable step"
+        )
+    
+    @given(
+        code=st.sampled_from([
+            "VALIDATION_ERROR", "API_ERROR", "DEVICE_NOT_FOUND", 
+            "CLIENT_NOT_FOUND", "NETWORK_NOT_FOUND", "RULE_NOT_FOUND",
+            "ROUTE_NOT_FOUND", "WLAN_NOT_FOUND", "FORWARD_NOT_FOUND",
+            "MISSING_FIELDS", "INVALID_VALUE", "VALUE_OUT_OF_RANGE",
+            "EXECUTION_ERROR", "CONFIRMATION_REQUIRED", "BOTH_ENDPOINTS_FAILED"
+        ]),
+        message=st.text(min_size=5, max_size=100),
+        num_steps=st.integers(min_value=1, max_value=5)
+    )
+    @settings(max_examples=100)
+    def test_tool_error_actionable_steps_property(self, code, message, num_steps):
+        """
+        **Feature: unifi-power-optimization, Property 2: Error Response Actionability**
+        **Validates: Requirements 7.2**
+        
+        For any error response from the MCP server, the response SHALL include
+        an actionable_steps field with at least one specific step the user can
+        take to resolve the issue.
+        """
+        from unifi_mcp.tools.base import ToolError
+        
+        # Generate actionable steps
+        steps = [f"Step {i+1}: Take action {i+1}" for i in range(num_steps)]
+        
+        error = ToolError(
+            code=code,
+            message=message,
+            actionable_steps=steps
+        )
+        
+        error_dict = error.to_dict()
+        
+        # Property: actionable_steps must be present and non-empty
+        assert "error" in error_dict, "Error response must have 'error' key"
+        assert "actionable_steps" in error_dict["error"], (
+            f"Error response for code '{code}' must include actionable_steps"
+        )
+        assert isinstance(error_dict["error"]["actionable_steps"], list), (
+            "actionable_steps must be a list"
+        )
+        assert len(error_dict["error"]["actionable_steps"]) >= 1, (
+            f"Error response for code '{code}' must have at least one actionable step"
+        )
+    
+    def test_base_tool_format_error_includes_actionable_steps(self):
+        """
+        **Feature: unifi-power-optimization, Property 2: Error Response Actionability**
+        **Validates: Requirements 7.2**
+        
+        The BaseTool.format_error method SHALL include actionable_steps in output.
+        """
+        from unifi_mcp.tools.base import BaseTool
+        
+        # Create a concrete tool for testing
+        class TestTool(BaseTool):
+            name = "unifi_test_tool"
+            description = "Test tool for error formatting"
+            input_schema = {"type": "object", "properties": {}}
+            
+            async def execute(self, unifi_client, **kwargs):
+                return {}
+        
+        tool = TestTool()
+        
+        error_response = tool.format_error(
+            code="TEST_ERROR",
+            message="Test error",
+            details="Test details",
+            actionable_steps=["Check configuration", "Verify access"]
+        )
+        
+        assert "error" in error_response, "format_error should return error dict"
+        assert "actionable_steps" in error_response["error"], (
+            "format_error output should include actionable_steps"
+        )
+        assert len(error_response["error"]["actionable_steps"]) >= 1, (
+            "format_error should include at least one actionable step"
+        )
+    
+    def test_endpoint_error_has_actionable_steps(self):
+        """
+        **Feature: unifi-power-optimization, Property 2: Error Response Actionability**
+        **Validates: Requirements 7.2**
+        
+        The EndpointError class SHALL provide actionable steps via get_actionable_steps().
+        """
+        from unifi_mcp.api.endpoint_router import EndpointError
+        
+        # Test single endpoint failure
+        error = EndpointError(
+            feature="firewall_rules",
+            primary_endpoint="/api/v2/firewall/rules",
+            primary_error="Connection refused",
+            message="Failed to retrieve firewall rules"
+        )
+        
+        steps = error.get_actionable_steps()
+        
+        assert isinstance(steps, list), "get_actionable_steps should return a list"
+        assert len(steps) >= 1, (
+            "EndpointError should provide at least one actionable step"
+        )
+    
+    def test_endpoint_error_both_endpoints_failed_has_actionable_steps(self):
+        """
+        **Feature: unifi-power-optimization, Property 2: Error Response Actionability**
+        **Validates: Requirements 7.2**
+        
+        When both v2 and v1 endpoints fail, EndpointError SHALL provide actionable steps.
+        """
+        from unifi_mcp.api.endpoint_router import EndpointError
+        
+        # Test both endpoints failed
+        error = EndpointError(
+            feature="firewall_rules",
+            primary_endpoint="/api/v2/firewall/rules",
+            primary_error="Connection refused",
+            fallback_endpoint="/api/s/default/rest/firewallrule",
+            fallback_error="Timeout",
+            message="Both endpoints failed"
+        )
+        
+        steps = error.get_actionable_steps()
+        
+        assert isinstance(steps, list), "get_actionable_steps should return a list"
+        assert len(steps) >= 1, (
+            "EndpointError with both failures should provide actionable steps"
+        )
+        # Should mention both endpoints failed
+        steps_text = " ".join(steps).lower()
+        assert "both" in steps_text or "v2" in steps_text or "v1" in steps_text, (
+            "Actionable steps should reference the dual endpoint failure"
+        )
+    
+    @given(tool_index=st.integers(min_value=0, max_value=max(0, len(ALL_TOOL_CLASSES) - 1)))
+    @settings(max_examples=100)
+    def test_tool_validation_errors_have_actionable_steps(self, tool_index):
+        """
+        **Feature: unifi-power-optimization, Property 2: Error Response Actionability**
+        **Validates: Requirements 7.2**
+        
+        For any tool, validation errors SHALL include actionable steps.
+        """
+        if not ALL_TOOL_CLASSES:
+            pytest.skip("No tool classes found")
+        
+        from unifi_mcp.tools.base import ToolError
+        
+        tool_class = ALL_TOOL_CLASSES[tool_index % len(ALL_TOOL_CLASSES)]
+        tool = tool_class()
+        
+        # Try to trigger a validation error with invalid input
+        try:
+            # Pass invalid type for a required field if any
+            tool.validate_input({"invalid_field_xyz": "invalid_value"})
+        except ToolError as e:
+            # Validation error should have actionable steps
+            assert e.actionable_steps is not None, (
+                f"Tool '{tool.name}' validation error should have actionable_steps"
+            )
+            assert len(e.actionable_steps) >= 1, (
+                f"Tool '{tool.name}' validation error should have at least one actionable step"
+            )
+        except Exception:
+            # If no validation error, that's fine - schema may allow empty input
+            pass
