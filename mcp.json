@@ -1,0 +1,44 @@
+{
+  "mcpServers": {
+    "unifi": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/MidwestMountaineer/Unifi-MCP-Server.git", "unifi-mcp-server"],
+      "env": {
+        "UNIFI_HOST": "${UNIFI_HOST}",
+        "UNIFI_PORT": "${UNIFI_PORT:-443}",
+        "UNIFI_API_KEY": "${UNIFI_API_KEY}",
+        "UNIFI_SITE": "${UNIFI_SITE:-default}",
+        "UNIFI_VERIFY_SSL": "${UNIFI_VERIFY_SSL:-false}",
+        "LOG_LEVEL": "${LOG_LEVEL:-INFO}"
+      },
+      "disabled": false,
+      "autoApprove": [
+        "unifi_list_devices",
+        "unifi_list_clients",
+        "unifi_list_networks",
+        "unifi_list_wlans",
+        "unifi_list_firewall_rules",
+        "unifi_list_traffic_routes",
+        "unifi_list_port_forwards",
+        "unifi_get_device_details",
+        "unifi_get_client_details",
+        "unifi_get_network_details",
+        "unifi_get_wlan_details",
+        "unifi_get_firewall_rule_details",
+        "unifi_get_route_details",
+        "unifi_get_port_forward_details",
+        "unifi_get_ips_status",
+        "unifi_get_network_stats",
+        "unifi_get_system_health",
+        "unifi_get_client_stats",
+        "unifi_get_device_stats",
+        "unifi_get_top_clients",
+        "unifi_get_dpi_stats",
+        "unifi_get_alerts",
+        "unifi_get_dhcp_status",
+        "unifi_verify_vlan_connectivity",
+        "unifi_export_configuration"
+      ]
+    }
+  }
+}
