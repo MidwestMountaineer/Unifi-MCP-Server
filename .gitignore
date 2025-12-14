@@ -3,6 +3,9 @@
 .env.local
 .env.*.local
 
+# Kiro settings (may contain credentials)
+.kiro/settings/
+
 # Python
 __pycache__/
 *.py[cod]
