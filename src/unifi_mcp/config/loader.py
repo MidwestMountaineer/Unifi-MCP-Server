@@ -50,6 +50,11 @@ class ToolsConfig:
     statistics: Dict[str, Any] = field(default_factory=dict)
     migration: Dict[str, Any] = field(default_factory=dict)
     write_operations: Dict[str, Any] = field(default_factory=dict)
+    firewall: Dict[str, Any] = field(default_factory=dict)
+    acl: Dict[str, Any] = field(default_factory=dict)
+    dns: Dict[str, Any] = field(default_factory=dict)
+    resources: Dict[str, Any] = field(default_factory=dict)
+    resources: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -322,6 +327,9 @@ def load_config(
             statistics=typed_config.get("tools", {}).get("statistics", {}),
             migration=typed_config.get("tools", {}).get("migration", {}),
             write_operations=typed_config.get("tools", {}).get("write_operations", {}),
+            firewall=typed_config.get("tools", {}).get("firewall", {}),
+            acl=typed_config.get("tools", {}).get("acl", {}),
+            dns=typed_config.get("tools", {}).get("dns", {}),
         )
         
         return Config(

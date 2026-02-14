@@ -1,4 +1,4 @@
-"""Unit tests for network discovery tools.
+﻿"""Unit tests for network discovery tools.
 
 Tests cover:
 - ListDevicesTool: device listing with filtering and pagination
@@ -13,10 +13,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from unifi_mcp.tools.network_discovery import (
     ListDevicesTool,
     GetDeviceDetailsTool,
+    ListPendingDevicesTool,
 )
 from unifi_mcp.tools.base import ToolError
 from unifi_mcp.unifi_client import UniFiClient
-
 
 # Mock device data (simulating UniFi API responses)
 
@@ -94,14 +94,13 @@ MOCK_DEVICES = [
     },
 ]
 
-
 @pytest.fixture
 def mock_unifi_client():
     """Create a mock UniFi client."""
     client = MagicMock(spec=UniFiClient)
     client.get = AsyncMock()
+    client.get_v1 = AsyncMock()
     return client
-
 
 class TestListDevicesTool:
     """Test ListDevicesTool functionality."""
@@ -109,8 +108,8 @@ class TestListDevicesTool:
     @pytest.mark.asyncio
     async def test_list_all_devices(self, mock_unifi_client):
         """Test listing all devices without filtering."""
-        # Setup mock response
-        mock_unifi_client.get.return_value = {"data": MOCK_DEVICES}
+        # Setup mock response (v1 envelope)
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_DEVICES, "totalCount": len(MOCK_DEVICES)}
         
         # Create tool and execute
         tool = ListDevicesTool()
@@ -125,14 +124,12 @@ class TestListDevicesTool:
         assert result["page_size"] == 50
         
         # Verify API call
-        mock_unifi_client.get.assert_called_once()
-        call_args = mock_unifi_client.get.call_args[0][0]
-        assert "/stat/device" in call_args
+        mock_unifi_client.get_v1.assert_called_once_with("devices", params=None)
     
     @pytest.mark.asyncio
     async def test_list_devices_filter_by_switch(self, mock_unifi_client):
         """Test filtering devices by type (switch)."""
-        mock_unifi_client.get.return_value = {"data": MOCK_DEVICES}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_DEVICES, "totalCount": len(MOCK_DEVICES)}
         
         tool = ListDevicesTool()
         result = await tool.execute(mock_unifi_client, device_type="switch")
@@ -146,7 +143,7 @@ class TestListDevicesTool:
     @pytest.mark.asyncio
     async def test_list_devices_filter_by_ap(self, mock_unifi_client):
         """Test filtering devices by type (access point)."""
-        mock_unifi_client.get.return_value = {"data": MOCK_DEVICES}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_DEVICES, "totalCount": len(MOCK_DEVICES)}
         
         tool = ListDevicesTool()
         result = await tool.execute(mock_unifi_client, device_type="ap")
@@ -159,7 +156,7 @@ class TestListDevicesTool:
     @pytest.mark.asyncio
     async def test_list_devices_filter_by_gateway(self, mock_unifi_client):
         """Test filtering devices by type (gateway)."""
-        mock_unifi_client.get.return_value = {"data": MOCK_DEVICES}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_DEVICES, "totalCount": len(MOCK_DEVICES)}
         
         tool = ListDevicesTool()
         result = await tool.execute(mock_unifi_client, device_type="gateway")
@@ -173,7 +170,7 @@ class TestListDevicesTool:
     @pytest.mark.asyncio
     async def test_list_devices_pagination(self, mock_unifi_client):
         """Test pagination of device list."""
-        mock_unifi_client.get.return_value = {"data": MOCK_DEVICES}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_DEVICES, "totalCount": len(MOCK_DEVICES)}
         
         tool = ListDevicesTool()
         
@@ -208,7 +205,7 @@ class TestListDevicesTool:
     @pytest.mark.asyncio
     async def test_list_devices_last_page_partial(self, mock_unifi_client):
         """Test last page with partial results."""
-        mock_unifi_client.get.return_value = {"data": MOCK_DEVICES}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_DEVICES, "totalCount": len(MOCK_DEVICES)}
         
         tool = ListDevicesTool()
         result = await tool.execute(
@@ -226,7 +223,7 @@ class TestListDevicesTool:
     @pytest.mark.asyncio
     async def test_list_devices_empty_result(self, mock_unifi_client):
         """Test listing devices when none exist."""
-        mock_unifi_client.get.return_value = {"data": []}
+        mock_unifi_client.get_v1.return_value = {"data": [], "totalCount": 0}
         
         tool = ListDevicesTool()
         result = await tool.execute(mock_unifi_client)
@@ -239,7 +236,7 @@ class TestListDevicesTool:
     @pytest.mark.asyncio
     async def test_list_devices_api_error(self, mock_unifi_client):
         """Test handling of API errors."""
-        mock_unifi_client.get.side_effect = Exception("API connection failed")
+        mock_unifi_client.get_v1.side_effect = Exception("API connection failed")
         
         tool = ListDevicesTool()
         
@@ -253,7 +250,7 @@ class TestListDevicesTool:
     @pytest.mark.asyncio
     async def test_device_summary_format(self, mock_unifi_client):
         """Test that device summary contains expected fields."""
-        mock_unifi_client.get.return_value = {"data": MOCK_DEVICES}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_DEVICES, "totalCount": len(MOCK_DEVICES)}
         
         tool = ListDevicesTool()
         result = await tool.execute(mock_unifi_client)
@@ -271,7 +268,7 @@ class TestListDevicesTool:
     @pytest.mark.asyncio
     async def test_device_status_online(self, mock_unifi_client):
         """Test that online devices are marked correctly."""
-        mock_unifi_client.get.return_value = {"data": MOCK_DEVICES}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_DEVICES, "totalCount": len(MOCK_DEVICES)}
         
         tool = ListDevicesTool()
         result = await tool.execute(mock_unifi_client)
@@ -284,7 +281,7 @@ class TestListDevicesTool:
     @pytest.mark.asyncio
     async def test_device_status_offline(self, mock_unifi_client):
         """Test that offline devices are marked correctly."""
-        mock_unifi_client.get.return_value = {"data": MOCK_DEVICES}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_DEVICES, "totalCount": len(MOCK_DEVICES)}
         
         tool = ListDevicesTool()
         result = await tool.execute(mock_unifi_client)
@@ -310,79 +307,105 @@ class TestListDevicesTool:
 
 class TestGetDeviceDetailsTool:
     """Test GetDeviceDetailsTool functionality."""
-    
+
+    def _mock_device_lookup(self, mock_unifi_client, device_id, devices=None):
+        """Helper to set up get_v1 mock for device detail lookups.
+
+        For direct ID lookup, returns the matching device.
+        For MAC/not-found, simulates direct lookup failure + fallback to list.
+        """
+        if devices is None:
+            devices = MOCK_DEVICES
+
+        # Find device by _id
+        target = None
+        for d in devices:
+            if d.get("_id", "").lower() == device_id.lower():
+                target = d
+                break
+
+        if target:
+            # Direct lookup succeeds - return the device directly
+            mock_unifi_client.get_v1.return_value = target
+        else:
+            # Direct lookup fails, fallback fetches all devices
+            mock_unifi_client.get_v1.side_effect = [
+                Exception("404 Not Found"),
+                {"data": devices, "totalCount": len(devices)},
+            ]
+
     @pytest.mark.asyncio
     async def test_get_device_by_id(self, mock_unifi_client):
         """Test getting device details by ID."""
-        mock_unifi_client.get.return_value = {"data": MOCK_DEVICES}
-        
+        self._mock_device_lookup(mock_unifi_client, "device1")
+
         tool = GetDeviceDetailsTool()
         result = await tool.execute(mock_unifi_client, device_id="device1")
-        
+
         assert result["success"] is True
         assert result["type"] == "device"
         assert "data" in result
-        
+
         device = result["data"]
         assert device["id"] == "device1"
         assert device["name"] == "Main Switch"
         assert device["type"] == "switch"
-    
+
     @pytest.mark.asyncio
     async def test_get_device_by_mac(self, mock_unifi_client):
         """Test getting device details by MAC address."""
-        mock_unifi_client.get.return_value = {"data": MOCK_DEVICES}
-        
+        self._mock_device_lookup(mock_unifi_client, "aa:bb:cc:dd:ee:02")
+
         tool = GetDeviceDetailsTool()
         result = await tool.execute(
             mock_unifi_client,
             device_id="aa:bb:cc:dd:ee:02"
         )
-        
+
         assert result["success"] is True
         device = result["data"]
         assert device["mac"] == "aa:bb:cc:dd:ee:02"
         assert device["name"] == "Living Room AP"
-    
+
     @pytest.mark.asyncio
     async def test_get_device_by_mac_without_colons(self, mock_unifi_client):
         """Test getting device by MAC address without colons."""
-        mock_unifi_client.get.return_value = {"data": MOCK_DEVICES}
-        
+        self._mock_device_lookup(mock_unifi_client, "aabbccddee02")
+
         tool = GetDeviceDetailsTool()
         result = await tool.execute(
             mock_unifi_client,
             device_id="aabbccddee02"
         )
-        
+
         assert result["success"] is True
         device = result["data"]
         assert device["mac"] == "aa:bb:cc:dd:ee:02"
-    
+
     @pytest.mark.asyncio
     async def test_get_device_not_found(self, mock_unifi_client):
         """Test getting device that doesn't exist."""
-        mock_unifi_client.get.return_value = {"data": MOCK_DEVICES}
-        
+        self._mock_device_lookup(mock_unifi_client, "nonexistent")
+
         tool = GetDeviceDetailsTool()
-        
+
         with pytest.raises(ToolError) as exc_info:
             await tool.execute(mock_unifi_client, device_id="nonexistent")
-        
+
         error = exc_info.value
         assert error.code == "DEVICE_NOT_FOUND"
         assert "nonexistent" in error.details
-    
+
     @pytest.mark.asyncio
     async def test_device_detail_format(self, mock_unifi_client):
         """Test that device details contain expected fields."""
-        mock_unifi_client.get.return_value = {"data": MOCK_DEVICES}
-        
+        self._mock_device_lookup(mock_unifi_client, "device1")
+
         tool = GetDeviceDetailsTool()
         result = await tool.execute(mock_unifi_client, device_id="device1")
-        
+
         device = result["data"]
-        
+
         # Check basic fields
         expected_fields = [
             "id", "mac", "name", "type", "model", "model_name",
@@ -390,24 +413,24 @@ class TestGetDeviceDetailsTool:
             "uptime", "uptime_readable", "version", "upgradable",
             "serial", "board_rev", "cpu_usage", "memory_usage", "uplink"
         ]
-        
+
         for field in expected_fields:
             assert field in device, f"Missing field: {field}"
-    
+
     @pytest.mark.asyncio
     async def test_switch_includes_ports(self, mock_unifi_client):
         """Test that switch details include port information."""
-        mock_unifi_client.get.return_value = {"data": MOCK_DEVICES}
-        
+        self._mock_device_lookup(mock_unifi_client, "device1")
+
         tool = GetDeviceDetailsTool()
         result = await tool.execute(mock_unifi_client, device_id="device1")
-        
+
         device = result["data"]
         assert "ports" in device
         assert "port_count" in device
         assert device["port_count"] == 1
         assert len(device["ports"]) == 1
-        
+
         # Check port structure
         port = device["ports"][0]
         assert "port_idx" in port
@@ -415,109 +438,216 @@ class TestGetDeviceDetailsTool:
         assert "enabled" in port
         assert "up" in port
         assert "speed" in port
-    
+
     @pytest.mark.asyncio
     async def test_ap_includes_radios(self, mock_unifi_client):
         """Test that AP details include radio information."""
-        mock_unifi_client.get.return_value = {"data": MOCK_DEVICES}
-        
+        self._mock_device_lookup(mock_unifi_client, "device2")
+
         tool = GetDeviceDetailsTool()
         result = await tool.execute(mock_unifi_client, device_id="device2")
-        
+
         device = result["data"]
         assert "radios" in device
         assert "client_count" in device
         assert device["client_count"] == 5
         assert len(device["radios"]) == 1
-        
+
         # Check radio structure
         radio = device["radios"][0]
         assert "name" in radio
         assert "channel" in radio
         assert "tx_power" in radio
         assert "num_sta" in radio
-    
+
     @pytest.mark.asyncio
     async def test_uptime_formatting(self, mock_unifi_client):
         """Test uptime is formatted in human-readable format."""
-        mock_unifi_client.get.return_value = {"data": MOCK_DEVICES}
-        
+        self._mock_device_lookup(mock_unifi_client, "device1")
+
         tool = GetDeviceDetailsTool()
         result = await tool.execute(mock_unifi_client, device_id="device1")
-        
+
         device = result["data"]
         assert "uptime_readable" in device
         # 86400 seconds = 1 day
         assert "1d" in device["uptime_readable"]
-    
+
     @pytest.mark.asyncio
     async def test_api_error_handling(self, mock_unifi_client):
         """Test handling of API errors."""
-        mock_unifi_client.get.side_effect = Exception("API connection failed")
-        
+        mock_unifi_client.get_v1.side_effect = Exception("API connection failed")
+
         tool = GetDeviceDetailsTool()
-        
+
         with pytest.raises(ToolError) as exc_info:
             await tool.execute(mock_unifi_client, device_id="device1")
-        
+
         error = exc_info.value
         assert error.code == "API_ERROR"
         assert "Failed to retrieve device details" in error.message
-    
+
     def test_tool_metadata(self):
         """Test tool metadata is correctly defined."""
         tool = GetDeviceDetailsTool()
-        
+
         assert tool.name == "unifi_get_device_details"
         assert tool.category == "network_discovery"
         assert tool.requires_confirmation is False
         assert "detail" in tool.description.lower()
-        
+
         # Check input schema
         assert "properties" in tool.input_schema
         assert "device_id" in tool.input_schema["properties"]
         assert "device_id" in tool.input_schema["required"]
-    
+
     @pytest.mark.asyncio
     async def test_case_insensitive_search(self, mock_unifi_client):
         """Test that device search is case-insensitive."""
-        mock_unifi_client.get.return_value = {"data": MOCK_DEVICES}
-        
+        self._mock_device_lookup(mock_unifi_client, "DEVICE1")
+
         tool = GetDeviceDetailsTool()
-        
+
         # Try with uppercase ID
         result = await tool.execute(mock_unifi_client, device_id="DEVICE1")
-        
+
         assert result["success"] is True
         assert result["data"]["id"] == "device1"
-    
+
     @pytest.mark.asyncio
     async def test_mac_address_formats(self, mock_unifi_client):
         """Test various MAC address formats are accepted."""
-        mock_unifi_client.get.return_value = {"data": MOCK_DEVICES}
-        
+        # Test with colons - MAC lookup uses fallback
+        self._mock_device_lookup(mock_unifi_client, "aa:bb:cc:dd:ee:01")
+
         tool = GetDeviceDetailsTool()
-        
-        # Test with colons
+
         result1 = await tool.execute(
             mock_unifi_client,
             device_id="aa:bb:cc:dd:ee:01"
         )
         assert result1["success"] is True
-        
+
         # Test without colons
+        self._mock_device_lookup(mock_unifi_client, "aabbccddee01")
         result2 = await tool.execute(
             mock_unifi_client,
             device_id="aabbccddee01"
         )
         assert result2["success"] is True
-        
+
         # Test uppercase
+        self._mock_device_lookup(mock_unifi_client, "AA:BB:CC:DD:EE:01")
         result3 = await tool.execute(
             mock_unifi_client,
             device_id="AA:BB:CC:DD:EE:01"
         )
         assert result3["success"] is True
+
+
+
+# Mock pending device data
+MOCK_PENDING_DEVICES = [
+    {
+        "id": "pending-uuid-001",
+        "mac": "ff:ee:dd:cc:bb:01",
+        "name": "New Switch",
+        "model": "USW-24-PoE",
+        "type": "usw",
+    },
+    {
+        "id": "pending-uuid-002",
+        "mac": "ff:ee:dd:cc:bb:02",
+        "model": "U6-Pro",
+        "type": "uap",
+    },
+]
+
+
+class TestListPendingDevicesTool:
+    """Test ListPendingDevicesTool functionality."""
+
+    @pytest.mark.asyncio
+    async def test_list_pending_devices(self, mock_unifi_client):
+        """Test listing pending devices."""
+        mock_unifi_client.get_v1.return_value = {
+            "data": MOCK_PENDING_DEVICES,
+            "totalCount": len(MOCK_PENDING_DEVICES),
+        }
+
+        tool = ListPendingDevicesTool()
+        result = await tool.execute(mock_unifi_client)
+
+        assert result["success"] is True
+        assert result["count"] == 2
+        mock_unifi_client.get_v1.assert_called_once_with("devices/pending", params=None)
+
+    @pytest.mark.asyncio
+    async def test_list_pending_devices_empty(self, mock_unifi_client):
+        """Test listing pending devices when none exist."""
+        mock_unifi_client.get_v1.return_value = {"data": [], "totalCount": 0}
+
+        tool = ListPendingDevicesTool()
+        result = await tool.execute(mock_unifi_client)
+
+        assert result["success"] is True
+        assert result["count"] == 0
+        assert result["data"] == []
+
+    @pytest.mark.asyncio
+    async def test_pending_device_format(self, mock_unifi_client):
+        """Test that pending device summary contains expected fields."""
+        mock_unifi_client.get_v1.return_value = {
+            "data": MOCK_PENDING_DEVICES,
+            "totalCount": len(MOCK_PENDING_DEVICES),
+        }
+
+        tool = ListPendingDevicesTool()
+        result = await tool.execute(mock_unifi_client)
+
+        device = result["data"][0]
+        assert device["id"] == "pending-uuid-001"
+        assert device["mac"] == "ff:ee:dd:cc:bb:01"
+        assert device["name"] == "New Switch"
+        assert device["model"] == "USW-24-PoE"
+        assert device["type"] == "usw"
+
+    @pytest.mark.asyncio
+    async def test_pending_device_missing_name_uses_model(self, mock_unifi_client):
+        """Test that pending device without name falls back to model."""
+        mock_unifi_client.get_v1.return_value = {
+            "data": MOCK_PENDING_DEVICES,
+            "totalCount": len(MOCK_PENDING_DEVICES),
+        }
+
+        tool = ListPendingDevicesTool()
+        result = await tool.execute(mock_unifi_client)
+
+        # Second device has no name, should fall back to model
+        device = result["data"][1]
+        assert device["name"] == "U6-Pro"
+
+    @pytest.mark.asyncio
+    async def test_list_pending_devices_api_error(self, mock_unifi_client):
+        """Test handling of API errors."""
+        mock_unifi_client.get_v1.side_effect = Exception("API connection failed")
+
+        tool = ListPendingDevicesTool()
+
+        with pytest.raises(ToolError) as exc_info:
+            await tool.execute(mock_unifi_client)
+
+        error = exc_info.value
+        assert error.code == "API_ERROR"
+        assert "pending" in error.message.lower()
+
+    def test_tool_metadata(self):
+        """Test tool metadata is correctly defined."""
+        tool = ListPendingDevicesTool()
+
+        assert tool.name == "unifi_list_pending_devices"
+        assert tool.category == "network_discovery"
+        assert tool.requires_confirmation is False
 
 
 class TestDeviceTypeMapping:
@@ -569,7 +699,6 @@ class TestDeviceTypeMapping:
         friendly = tool._get_device_type_friendly("unknown-device")
         assert friendly == "unknown-device"
 
-
 class TestUptimeFormatting:
     """Test uptime formatting helper."""
     
@@ -616,7 +745,6 @@ class TestUptimeFormatting:
         formatted = tool._format_uptime(0)
         
         assert "0m" in formatted
-
 
 class TestInputValidation:
     """Test input validation for network discovery tools."""
@@ -666,8 +794,6 @@ class TestInputValidation:
         
         with pytest.raises(ToolError):
             tool.validate_input({})  # Missing required device_id
-
-
 
 # Mock client data (simulating UniFi API responses)
 
@@ -796,15 +922,14 @@ MOCK_CLIENTS = [
     },
 ]
 
-
 class TestListClientsTool:
     """Test ListClientsTool functionality."""
     
     @pytest.mark.asyncio
     async def test_list_all_clients(self, mock_unifi_client):
         """Test listing all clients without filtering."""
-        # Setup mock response
-        mock_unifi_client.get.return_value = {"data": MOCK_CLIENTS}
+        # Setup mock response (v1 envelope format)
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_CLIENTS, "totalCount": len(MOCK_CLIENTS), "offset": 0, "limit": 25, "count": len(MOCK_CLIENTS)}
         
         # Import the tool
         from unifi_mcp.tools.network_discovery import ListClientsTool
@@ -822,14 +947,12 @@ class TestListClientsTool:
         assert result["page_size"] == 50
         
         # Verify API call
-        mock_unifi_client.get.assert_called_once()
-        call_args = mock_unifi_client.get.call_args[0][0]
-        assert "/stat/sta" in call_args
+        mock_unifi_client.get_v1.assert_called_once()
     
     @pytest.mark.asyncio
     async def test_list_clients_filter_by_wired(self, mock_unifi_client):
         """Test filtering clients by wired connection."""
-        mock_unifi_client.get.return_value = {"data": MOCK_CLIENTS}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_CLIENTS, "totalCount": len(MOCK_CLIENTS), "offset": 0, "limit": 25, "count": len(MOCK_CLIENTS)}
         
         from unifi_mcp.tools.network_discovery import ListClientsTool
         
@@ -844,7 +967,7 @@ class TestListClientsTool:
     @pytest.mark.asyncio
     async def test_list_clients_filter_by_wireless(self, mock_unifi_client):
         """Test filtering clients by wireless connection."""
-        mock_unifi_client.get.return_value = {"data": MOCK_CLIENTS}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_CLIENTS, "totalCount": len(MOCK_CLIENTS), "offset": 0, "limit": 25, "count": len(MOCK_CLIENTS)}
         
         from unifi_mcp.tools.network_discovery import ListClientsTool
         
@@ -859,7 +982,7 @@ class TestListClientsTool:
     @pytest.mark.asyncio
     async def test_list_clients_pagination(self, mock_unifi_client):
         """Test pagination of client list."""
-        mock_unifi_client.get.return_value = {"data": MOCK_CLIENTS}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_CLIENTS, "totalCount": len(MOCK_CLIENTS), "offset": 0, "limit": 25, "count": len(MOCK_CLIENTS)}
         
         from unifi_mcp.tools.network_discovery import ListClientsTool
         
@@ -896,7 +1019,7 @@ class TestListClientsTool:
     @pytest.mark.asyncio
     async def test_list_clients_empty_result(self, mock_unifi_client):
         """Test listing clients when none exist."""
-        mock_unifi_client.get.return_value = {"data": []}
+        mock_unifi_client.get_v1.return_value = {"data": [], "totalCount": 0, "offset": 0, "limit": 25, "count": 0}
         
         from unifi_mcp.tools.network_discovery import ListClientsTool
         
@@ -911,7 +1034,7 @@ class TestListClientsTool:
     @pytest.mark.asyncio
     async def test_list_clients_api_error(self, mock_unifi_client):
         """Test handling of API errors."""
-        mock_unifi_client.get.side_effect = Exception("API connection failed")
+        mock_unifi_client.get_v1.side_effect = Exception("API connection failed")
         
         from unifi_mcp.tools.network_discovery import ListClientsTool
         
@@ -927,7 +1050,7 @@ class TestListClientsTool:
     @pytest.mark.asyncio
     async def test_client_summary_format(self, mock_unifi_client):
         """Test that client summary contains expected fields."""
-        mock_unifi_client.get.return_value = {"data": MOCK_CLIENTS}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_CLIENTS, "totalCount": len(MOCK_CLIENTS), "offset": 0, "limit": 25, "count": len(MOCK_CLIENTS)}
         
         from unifi_mcp.tools.network_discovery import ListClientsTool
         
@@ -948,7 +1071,7 @@ class TestListClientsTool:
     @pytest.mark.asyncio
     async def test_wireless_client_has_signal_info(self, mock_unifi_client):
         """Test that wireless clients include signal information."""
-        mock_unifi_client.get.return_value = {"data": MOCK_CLIENTS}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_CLIENTS, "totalCount": len(MOCK_CLIENTS), "offset": 0, "limit": 25, "count": len(MOCK_CLIENTS)}
         
         from unifi_mcp.tools.network_discovery import ListClientsTool
         
@@ -965,7 +1088,7 @@ class TestListClientsTool:
     @pytest.mark.asyncio
     async def test_wired_client_no_signal_info(self, mock_unifi_client):
         """Test that wired clients don't include signal information."""
-        mock_unifi_client.get.return_value = {"data": MOCK_CLIENTS}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_CLIENTS, "totalCount": len(MOCK_CLIENTS), "offset": 0, "limit": 25, "count": len(MOCK_CLIENTS)}
         
         from unifi_mcp.tools.network_discovery import ListClientsTool
         
@@ -995,14 +1118,13 @@ class TestListClientsTool:
         assert "page" in tool.input_schema["properties"]
         assert "page_size" in tool.input_schema["properties"]
 
-
 class TestGetClientDetailsTool:
     """Test GetClientDetailsTool functionality."""
     
     @pytest.mark.asyncio
     async def test_get_client_by_mac(self, mock_unifi_client):
         """Test getting client details by MAC address."""
-        mock_unifi_client.get.return_value = {"data": MOCK_CLIENTS}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_CLIENTS, "totalCount": len(MOCK_CLIENTS), "offset": 0, "limit": 25, "count": len(MOCK_CLIENTS)}
         
         from unifi_mcp.tools.network_discovery import GetClientDetailsTool
         
@@ -1024,7 +1146,7 @@ class TestGetClientDetailsTool:
     @pytest.mark.asyncio
     async def test_get_client_by_mac_without_colons(self, mock_unifi_client):
         """Test getting client by MAC address without colons."""
-        mock_unifi_client.get.return_value = {"data": MOCK_CLIENTS}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_CLIENTS, "totalCount": len(MOCK_CLIENTS), "offset": 0, "limit": 25, "count": len(MOCK_CLIENTS)}
         
         from unifi_mcp.tools.network_discovery import GetClientDetailsTool
         
@@ -1041,7 +1163,7 @@ class TestGetClientDetailsTool:
     @pytest.mark.asyncio
     async def test_get_client_not_found(self, mock_unifi_client):
         """Test getting client that doesn't exist."""
-        mock_unifi_client.get.return_value = {"data": MOCK_CLIENTS}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_CLIENTS, "totalCount": len(MOCK_CLIENTS), "offset": 0, "limit": 25, "count": len(MOCK_CLIENTS)}
         
         from unifi_mcp.tools.network_discovery import GetClientDetailsTool
         
@@ -1057,7 +1179,7 @@ class TestGetClientDetailsTool:
     @pytest.mark.asyncio
     async def test_client_detail_format(self, mock_unifi_client):
         """Test that client details contain expected fields."""
-        mock_unifi_client.get.return_value = {"data": MOCK_CLIENTS}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_CLIENTS, "totalCount": len(MOCK_CLIENTS), "offset": 0, "limit": 25, "count": len(MOCK_CLIENTS)}
         
         from unifi_mcp.tools.network_discovery import GetClientDetailsTool
         
@@ -1084,7 +1206,7 @@ class TestGetClientDetailsTool:
     @pytest.mark.asyncio
     async def test_wireless_client_includes_wireless_fields(self, mock_unifi_client):
         """Test that wireless client details include wireless-specific fields."""
-        mock_unifi_client.get.return_value = {"data": MOCK_CLIENTS}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_CLIENTS, "totalCount": len(MOCK_CLIENTS), "offset": 0, "limit": 25, "count": len(MOCK_CLIENTS)}
         
         from unifi_mcp.tools.network_discovery import GetClientDetailsTool
         
@@ -1108,7 +1230,7 @@ class TestGetClientDetailsTool:
     @pytest.mark.asyncio
     async def test_wired_client_includes_wired_fields(self, mock_unifi_client):
         """Test that wired client details include wired-specific fields."""
-        mock_unifi_client.get.return_value = {"data": MOCK_CLIENTS}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_CLIENTS, "totalCount": len(MOCK_CLIENTS), "offset": 0, "limit": 25, "count": len(MOCK_CLIENTS)}
         
         from unifi_mcp.tools.network_discovery import GetClientDetailsTool
         
@@ -1129,7 +1251,7 @@ class TestGetClientDetailsTool:
     @pytest.mark.asyncio
     async def test_client_includes_connected_device_info(self, mock_unifi_client):
         """Test that client details include connected device information."""
-        mock_unifi_client.get.return_value = {"data": MOCK_CLIENTS}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_CLIENTS, "totalCount": len(MOCK_CLIENTS), "offset": 0, "limit": 25, "count": len(MOCK_CLIENTS)}
         
         from unifi_mcp.tools.network_discovery import GetClientDetailsTool
         
@@ -1150,7 +1272,7 @@ class TestGetClientDetailsTool:
     @pytest.mark.asyncio
     async def test_uptime_formatting(self, mock_unifi_client):
         """Test uptime is formatted in human-readable format."""
-        mock_unifi_client.get.return_value = {"data": MOCK_CLIENTS}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_CLIENTS, "totalCount": len(MOCK_CLIENTS), "offset": 0, "limit": 25, "count": len(MOCK_CLIENTS)}
         
         from unifi_mcp.tools.network_discovery import GetClientDetailsTool
         
@@ -1168,7 +1290,7 @@ class TestGetClientDetailsTool:
     @pytest.mark.asyncio
     async def test_bytes_formatting(self, mock_unifi_client):
         """Test bytes are formatted in human-readable format."""
-        mock_unifi_client.get.return_value = {"data": MOCK_CLIENTS}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_CLIENTS, "totalCount": len(MOCK_CLIENTS), "offset": 0, "limit": 25, "count": len(MOCK_CLIENTS)}
         
         from unifi_mcp.tools.network_discovery import GetClientDetailsTool
         
@@ -1189,7 +1311,7 @@ class TestGetClientDetailsTool:
     @pytest.mark.asyncio
     async def test_api_error_handling(self, mock_unifi_client):
         """Test handling of API errors."""
-        mock_unifi_client.get.side_effect = Exception("API connection failed")
+        mock_unifi_client.get_v1.side_effect = Exception("API connection failed")
         
         from unifi_mcp.tools.network_discovery import GetClientDetailsTool
         
@@ -1224,7 +1346,7 @@ class TestGetClientDetailsTool:
     @pytest.mark.asyncio
     async def test_case_insensitive_search(self, mock_unifi_client):
         """Test that client search is case-insensitive."""
-        mock_unifi_client.get.return_value = {"data": MOCK_CLIENTS}
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_CLIENTS, "totalCount": len(MOCK_CLIENTS), "offset": 0, "limit": 25, "count": len(MOCK_CLIENTS)}
         
         from unifi_mcp.tools.network_discovery import GetClientDetailsTool
         
@@ -1238,7 +1360,6 @@ class TestGetClientDetailsTool:
         
         assert result["success"] is True
         assert result["data"]["mac"] == "11:22:33:44:55:01"
-
 
 class TestBytesFormatting:
     """Test bytes formatting helper."""
@@ -1301,7 +1422,6 @@ class TestBytesFormatting:
         formatted = tool._format_bytes(0)
         assert "0 B" in formatted
 
-
 class TestClientInputValidation:
     """Test input validation for client tools."""
     
@@ -1362,8 +1482,6 @@ class TestClientInputValidation:
         
         with pytest.raises(ToolError):
             tool.validate_input({})  # Missing required mac_address
-
-
 
 # Mock network data (simulating UniFi API responses)
 
@@ -1438,7 +1556,6 @@ MOCK_NETWORKS = [
         "dhcp_relay_enabled": False,
     },
 ]
-
 
 # Mock WLAN data (simulating UniFi API responses)
 
@@ -1547,7 +1664,6 @@ MOCK_WLANS = [
     },
 ]
 
-
 class TestListNetworksTool:
     """Test ListNetworksTool functionality."""
     
@@ -1556,14 +1672,14 @@ class TestListNetworksTool:
         """Test successful network listing."""
         from unifi_mcp.tools.network_discovery import ListNetworksTool
         
-        # Mock API response
-        mock_unifi_client.get.return_value = {"data": MOCK_NETWORKS}
+        # Mock API response (v1 envelope format)
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_NETWORKS, "totalCount": len(MOCK_NETWORKS), "offset": 0, "limit": 25, "count": len(MOCK_NETWORKS)}
         
         tool = ListNetworksTool()
         result = await tool.execute(mock_unifi_client)
         
         # Verify API call
-        mock_unifi_client.get.assert_called_once_with("/api/s/{site}/rest/networkconf")
+        mock_unifi_client.get_v1.assert_called_once()
         
         # Verify result structure
         assert "data" in result
@@ -1583,8 +1699,8 @@ class TestListNetworksTool:
         """Test listing networks when none exist."""
         from unifi_mcp.tools.network_discovery import ListNetworksTool
         
-        # Mock empty response
-        mock_unifi_client.get.return_value = {"data": []}
+        # Mock empty response (v1 envelope format)
+        mock_unifi_client.get_v1.return_value = {"data": [], "totalCount": 0, "offset": 0, "limit": 25, "count": 0}
         
         tool = ListNetworksTool()
         result = await tool.execute(mock_unifi_client)
@@ -1598,7 +1714,7 @@ class TestListNetworksTool:
         from unifi_mcp.tools.network_discovery import ListNetworksTool
         
         # Mock API error
-        mock_unifi_client.get.side_effect = Exception("Connection failed")
+        mock_unifi_client.get_v1.side_effect = Exception("Connection failed")
         
         tool = ListNetworksTool()
         
@@ -1608,7 +1724,6 @@ class TestListNetworksTool:
         assert exc_info.value.code == "API_ERROR"
         assert "Failed to retrieve network list" in exc_info.value.message
 
-
 class TestGetNetworkDetailsTool:
     """Test GetNetworkDetailsTool functionality."""
     
@@ -1617,8 +1732,9 @@ class TestGetNetworkDetailsTool:
         """Test getting network details by ID."""
         from unifi_mcp.tools.network_discovery import GetNetworkDetailsTool
         
-        # Mock API response
-        mock_unifi_client.get.return_value = {"data": MOCK_NETWORKS}
+        # Mock direct v1 lookup response (returns single network in data list)
+        target_network = MOCK_NETWORKS[1]  # IoT network (network2)
+        mock_unifi_client.get_v1.return_value = {"data": [target_network], "totalCount": 1, "offset": 0, "limit": 25, "count": 1}
         
         tool = GetNetworkDetailsTool()
         result = await tool.execute(mock_unifi_client, network_id="network2")
@@ -1637,8 +1753,11 @@ class TestGetNetworkDetailsTool:
         """Test getting network details by name."""
         from unifi_mcp.tools.network_discovery import GetNetworkDetailsTool
         
-        # Mock API response
-        mock_unifi_client.get.return_value = {"data": MOCK_NETWORKS}
+        # Direct v1 lookup by name will fail, fallback fetches all networks
+        mock_unifi_client.get_v1.side_effect = [
+            Exception("Not found"),  # Direct lookup fails
+            {"data": MOCK_NETWORKS, "totalCount": len(MOCK_NETWORKS), "offset": 0, "limit": 25, "count": len(MOCK_NETWORKS)}  # Fallback succeeds
+        ]
         
         tool = GetNetworkDetailsTool()
         result = await tool.execute(mock_unifi_client, network_id="guest")
@@ -1653,8 +1772,11 @@ class TestGetNetworkDetailsTool:
         """Test getting details for non-existent network."""
         from unifi_mcp.tools.network_discovery import GetNetworkDetailsTool
         
-        # Mock API response
-        mock_unifi_client.get.return_value = {"data": MOCK_NETWORKS}
+        # Direct v1 lookup fails, fallback returns all networks but none match
+        mock_unifi_client.get_v1.side_effect = [
+            Exception("Not found"),  # Direct lookup fails
+            {"data": MOCK_NETWORKS, "totalCount": len(MOCK_NETWORKS), "offset": 0, "limit": 25, "count": len(MOCK_NETWORKS)}  # Fallback succeeds but no match
+        ]
         
         tool = GetNetworkDetailsTool()
         
@@ -1669,8 +1791,8 @@ class TestGetNetworkDetailsTool:
         """Test handling of API errors."""
         from unifi_mcp.tools.network_discovery import GetNetworkDetailsTool
         
-        # Mock API error
-        mock_unifi_client.get.side_effect = Exception("Connection failed")
+        # Mock API error (both direct lookup and fallback fail)
+        mock_unifi_client.get_v1.side_effect = Exception("Connection failed")
         
         tool = GetNetworkDetailsTool()
         
@@ -1678,7 +1800,6 @@ class TestGetNetworkDetailsTool:
             await tool.execute(mock_unifi_client, network_id="network1")
         
         assert exc_info.value.code == "API_ERROR"
-
 
 class TestListWLANsTool:
     """Test ListWLANsTool functionality."""
@@ -1688,14 +1809,14 @@ class TestListWLANsTool:
         """Test successful WLAN listing."""
         from unifi_mcp.tools.network_discovery import ListWLANsTool
         
-        # Mock API response
-        mock_unifi_client.get.return_value = {"data": MOCK_WLANS}
+        # Mock API response (v1 envelope format)
+        mock_unifi_client.get_v1.return_value = {"data": MOCK_WLANS, "totalCount": len(MOCK_WLANS), "offset": 0, "limit": 25, "count": len(MOCK_WLANS)}
         
         tool = ListWLANsTool()
         result = await tool.execute(mock_unifi_client)
         
         # Verify API call
-        mock_unifi_client.get.assert_called_once_with("/api/s/{site}/rest/wlanconf")
+        mock_unifi_client.get_v1.assert_called_once()
         
         # Verify result structure
         assert "data" in result
@@ -1715,8 +1836,8 @@ class TestListWLANsTool:
         """Test listing WLANs when none exist."""
         from unifi_mcp.tools.network_discovery import ListWLANsTool
         
-        # Mock empty response
-        mock_unifi_client.get.return_value = {"data": []}
+        # Mock empty response (v1 envelope format)
+        mock_unifi_client.get_v1.return_value = {"data": [], "totalCount": 0, "offset": 0, "limit": 25, "count": 0}
         
         tool = ListWLANsTool()
         result = await tool.execute(mock_unifi_client)
@@ -1730,7 +1851,7 @@ class TestListWLANsTool:
         from unifi_mcp.tools.network_discovery import ListWLANsTool
         
         # Mock API error
-        mock_unifi_client.get.side_effect = Exception("Connection failed")
+        mock_unifi_client.get_v1.side_effect = Exception("Connection failed")
         
         tool = ListWLANsTool()
         
@@ -1738,8 +1859,7 @@ class TestListWLANsTool:
             await tool.execute(mock_unifi_client)
         
         assert exc_info.value.code == "API_ERROR"
-        assert "Failed to retrieve WLAN list" in exc_info.value.message
-
+        assert "Failed to retrieve WiFi broadcast list" in exc_info.value.message
 
 class TestGetWLANDetailsTool:
     """Test GetWLANDetailsTool functionality."""
@@ -1749,8 +1869,9 @@ class TestGetWLANDetailsTool:
         """Test getting WLAN details by ID."""
         from unifi_mcp.tools.network_discovery import GetWLANDetailsTool
         
-        # Mock API response
-        mock_unifi_client.get.return_value = {"data": MOCK_WLANS}
+        # Mock direct v1 lookup response (returns single WLAN in data list)
+        target_wlan = MOCK_WLANS[1]  # IoT-WiFi (wlan2)
+        mock_unifi_client.get_v1.return_value = {"data": [target_wlan], "totalCount": 1, "offset": 0, "limit": 25, "count": 1}
         
         tool = GetWLANDetailsTool()
         result = await tool.execute(mock_unifi_client, wlan_id="wlan2")
@@ -1769,8 +1890,11 @@ class TestGetWLANDetailsTool:
         """Test getting WLAN details by name."""
         from unifi_mcp.tools.network_discovery import GetWLANDetailsTool
         
-        # Mock API response
-        mock_unifi_client.get.return_value = {"data": MOCK_WLANS}
+        # Direct v1 lookup by name will fail, fallback fetches all WLANs
+        mock_unifi_client.get_v1.side_effect = [
+            Exception("Not found"),  # Direct lookup fails
+            {"data": MOCK_WLANS, "totalCount": len(MOCK_WLANS), "offset": 0, "limit": 25, "count": len(MOCK_WLANS)}  # Fallback succeeds
+        ]
         
         tool = GetWLANDetailsTool()
         result = await tool.execute(mock_unifi_client, wlan_id="guest-wifi")
@@ -1786,8 +1910,11 @@ class TestGetWLANDetailsTool:
         """Test getting details for non-existent WLAN."""
         from unifi_mcp.tools.network_discovery import GetWLANDetailsTool
         
-        # Mock API response
-        mock_unifi_client.get.return_value = {"data": MOCK_WLANS}
+        # Direct v1 lookup fails, fallback returns all WLANs but none match
+        mock_unifi_client.get_v1.side_effect = [
+            Exception("Not found"),  # Direct lookup fails
+            {"data": MOCK_WLANS, "totalCount": len(MOCK_WLANS), "offset": 0, "limit": 25, "count": len(MOCK_WLANS)}  # Fallback succeeds but no match
+        ]
         
         tool = GetWLANDetailsTool()
         
@@ -1795,15 +1922,15 @@ class TestGetWLANDetailsTool:
             await tool.execute(mock_unifi_client, wlan_id="nonexistent")
         
         assert exc_info.value.code == "WLAN_NOT_FOUND"
-        assert "WLAN not found" in exc_info.value.message
+        assert "WiFi broadcast not found" in exc_info.value.message
     
     @pytest.mark.asyncio
     async def test_get_wlan_details_api_error(self, mock_unifi_client):
         """Test handling of API errors."""
         from unifi_mcp.tools.network_discovery import GetWLANDetailsTool
         
-        # Mock API error
-        mock_unifi_client.get.side_effect = Exception("Connection failed")
+        # Mock API error (both direct lookup and fallback fail)
+        mock_unifi_client.get_v1.side_effect = Exception("Connection failed")
         
         tool = GetWLANDetailsTool()
         
@@ -1811,7 +1938,6 @@ class TestGetWLANDetailsTool:
             await tool.execute(mock_unifi_client, wlan_id="wlan1")
         
         assert exc_info.value.code == "API_ERROR"
-
 
 class TestNetworkInputValidation:
     """Test input validation for network tools."""
@@ -1842,7 +1968,6 @@ class TestNetworkInputValidation:
         
         with pytest.raises(ToolError):
             tool.validate_input({})  # Missing required network_id
-
 
 class TestWLANInputValidation:
     """Test input validation for WLAN tools."""

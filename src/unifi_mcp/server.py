@@ -79,6 +79,7 @@ class UniFiMCPServer:
         from .tools.network_discovery import (
             ListDevicesTool,
             GetDeviceDetailsTool,
+            ListPendingDevicesTool,
             ListClientsTool,
             GetClientDetailsTool,
             ListNetworksTool,
@@ -87,13 +88,37 @@ class UniFiMCPServer:
             GetWLANDetailsTool,
         )
         from .tools.security import (
-            ListFirewallRulesTool,
-            GetFirewallRuleDetailsTool,
             ListTrafficRoutesTool,
             GetRouteDetailsTool,
             ListPortForwardsTool,
             GetPortForwardDetailsTool,
             GetIPSStatusTool,
+        )
+        from .tools.firewall import (
+            ListFirewallZonesTool,
+            GetFirewallZoneTool,
+            ListFirewallPoliciesTool,
+            GetFirewallPolicyTool,
+            GetFirewallPolicyOrderingTool,
+            ListTrafficMatchingListsTool,
+            GetTrafficMatchingListTool,
+        )
+        from .tools.acl import (
+            ListACLRulesTool,
+            GetACLRuleTool,
+            GetACLRuleOrderingTool,
+        )
+        from .tools.dns import (
+            ListDNSPoliciesTool,
+            GetDNSPolicyTool,
+        )
+        from .tools.resources import (
+            ListSitesTool,
+            GetAppInfoTool,
+            ListWANInterfacesTool,
+            ListVPNTunnelsTool,
+            ListVPNServersTool,
+            GetNetworkReferencesTool,
         )
         from .tools.statistics import (
             GetNetworkStatsTool,
@@ -114,6 +139,7 @@ class UniFiMCPServer:
         tools_to_register = [
             ListDevicesTool(),
             GetDeviceDetailsTool(),
+            ListPendingDevicesTool(),
             ListClientsTool(),
             GetClientDetailsTool(),
             ListNetworksTool(),
@@ -121,13 +147,33 @@ class UniFiMCPServer:
             ListWLANsTool(),
             GetWLANDetailsTool(),
             # Security Tools
-            ListFirewallRulesTool(),
-            GetFirewallRuleDetailsTool(),
             ListTrafficRoutesTool(),
             GetRouteDetailsTool(),
             ListPortForwardsTool(),
             GetPortForwardDetailsTool(),
             GetIPSStatusTool(),
+            # Firewall Tools
+            ListFirewallZonesTool(),
+            GetFirewallZoneTool(),
+            ListFirewallPoliciesTool(),
+            GetFirewallPolicyTool(),
+            GetFirewallPolicyOrderingTool(),
+            ListTrafficMatchingListsTool(),
+            GetTrafficMatchingListTool(),
+            # ACL Tools
+            ListACLRulesTool(),
+            GetACLRuleTool(),
+            GetACLRuleOrderingTool(),
+            # DNS Tools
+            ListDNSPoliciesTool(),
+            GetDNSPolicyTool(),
+            # Resource Tools
+            ListSitesTool(),
+            GetAppInfoTool(),
+            ListWANInterfacesTool(),
+            ListVPNTunnelsTool(),
+            ListVPNServersTool(),
+            GetNetworkReferencesTool(),
             # Statistics Tools
             GetNetworkStatsTool(),
             GetSystemHealthTool(),

@@ -431,6 +431,10 @@ class ToolRegistry:
             "statistics": self.config.tools.statistics,
             "migration": self.config.tools.migration,
             "write_operations": self.config.tools.write_operations,
+            "firewall": self.config.tools.firewall,
+            "acl": self.config.tools.acl,
+            "dns": self.config.tools.dns,
+            "resources": self.config.tools.resources,
         }
         
         return category_map.get(category)

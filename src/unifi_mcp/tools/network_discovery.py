@@ -40,9 +40,6 @@ class ListDevicesTool(BaseTool):
     description = "List all UniFi devices (switches, APs, gateways) with optional filtering"
     category = "network_discovery"
     
-    # Fields to include in concise response format
-    CONCISE_FIELDS = ["id", "name", "type", "status", "ip"]
-    
     input_schema = {
         "type": "object",
         "properties": {
@@ -65,11 +62,19 @@ class ListDevicesTool(BaseTool):
                 "maximum": 500,
                 "default": 50
             },
-            "response_format": {
+            "offset": {
+                "type": "integer",
+                "description": "Number of items to skip (v1 pagination)",
+                "minimum": 0
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of items to return (v1 pagination)",
+                "minimum": 1
+            },
+            "filter": {
                 "type": "string",
-                "enum": ["detailed", "concise"],
-                "description": "Response format: 'detailed' for all fields, 'concise' for essential fields only",
-                "default": "detailed"
+                "description": "Filter expression for v1 API"
             }
         }
     }
@@ -80,7 +85,9 @@ class ListDevicesTool(BaseTool):
         device_type: str = "all",
         page: int = 1,
         page_size: int = 50,
-        response_format: str = "detailed",
+        offset: Optional[int] = None,
+        limit: Optional[int] = None,
+        filter_expr: Optional[str] = None,
         **kwargs: Any
     ) -> Dict[str, Any]:
         """Execute the list devices tool.
@@ -90,25 +97,41 @@ class ListDevicesTool(BaseTool):
             device_type: Filter by device type (all, switch, ap, gateway)
             page: Page number for pagination
             page_size: Number of devices per page
-            response_format: "detailed" or "concise" response format
+            offset: Number of items to skip (v1 pagination)
+            limit: Maximum number of items to return (v1 pagination)
+            filter_expr: Filter expression for v1 API
             **kwargs: Additional arguments (ignored)
         
         Returns:
             Formatted list of devices with pagination info
         """
         try:
-            # Fetch devices from UniFi controller
+            # Fetch devices from UniFi controller via v1 API
             logger.info(
-                f"Fetching devices (type={device_type}, page={page}, "
-                f"page_size={page_size}, format={response_format})"
+                f"Fetching devices (type={device_type}, page={page}, page_size={page_size})"
             )
             
-            response = await unifi_client.get(f"/api/s/{{site}}/stat/device")
+            # Handle 'filter' kwarg from MCP input schema
+            if filter_expr is None and "filter" in kwargs:
+                filter_expr = kwargs.pop("filter")
+
+            params: Dict[str, Any] = {}
+            if offset is not None:
+                params["offset"] = offset
+            if limit is not None:
+                params["limit"] = limit
+            if filter_expr is not None:
+                params["filter"] = filter_expr
+
+            response = await unifi_client.get_v1(
+                "devices", params=params if params else None
+            )
             
-            # Extract device data from response
+            # Extract device data from v1 response envelope
             devices = response.get("data", [])
+            total_count = response.get("totalCount", len(devices))
             
-            logger.debug(f"Retrieved {len(devices)} devices from controller")
+            logger.debug(f"Retrieved {len(devices)} devices from controller (totalCount={total_count})")
             
             # Filter by device type if specified
             if device_type != "all":
@@ -129,13 +152,11 @@ class ListDevicesTool(BaseTool):
                 f"(page {page}/{(total + page_size - 1) // page_size}, total={total})"
             )
             
-            return self.format_list_with_truncation(
+            return self.format_list(
                 items=paginated_devices,
                 total=total,
                 page=page,
-                page_size=page_size,
-                response_format=response_format,
-                concise_fields=self.CONCISE_FIELDS
+                page_size=page_size
             )
         
         except Exception as e:
@@ -187,21 +208,29 @@ class ListDevicesTool(BaseTool):
         
         Extracts only the most relevant fields for AI consumption,
         avoiding overwhelming the context window with unnecessary data.
+        Handles both v1 and legacy field names gracefully.
         
         Args:
-            device: Raw device data from UniFi API
+            device: Raw device data from UniFi API (v1 or legacy)
         
         Returns:
             Formatted device summary
         """
+        # Handle state field: v1 uses "ONLINE"/"OFFLINE" strings, legacy uses 1/0 integers
+        state = device.get("state", 0)
+        if isinstance(state, str):
+            status = "online" if state.upper() == "ONLINE" else "offline"
+        else:
+            status = "online" if state == 1 else "offline"
+        
         return {
-            "id": device.get("_id", ""),
+            "id": device.get("id", device.get("_id", "")),
             "mac": device.get("mac", ""),
             "name": device.get("name", device.get("hostname", "Unknown")),
             "type": self._get_device_type_friendly(device.get("type", "")),
             "model": device.get("model", ""),
             "ip": device.get("ip", ""),
-            "status": "online" if device.get("state", 0) == 1 else "offline",
+            "status": status,
             "uptime": device.get("uptime", 0),
             "version": device.get("version", ""),
             "adopted": device.get("adopted", False),
@@ -277,14 +306,25 @@ class GetDeviceDetailsTool(BaseTool):
             Formatted device details
         """
         try:
-            # Fetch all devices (UniFi doesn't have a single device endpoint)
             logger.info(f"Fetching details for device: {device_id}")
             
-            response = await unifi_client.get(f"/api/s/{{site}}/stat/device")
-            devices = response.get("data", [])
-            
-            # Find the specific device by ID or MAC
-            device = self._find_device(devices, device_id)
+            # Try direct v1 lookup by device ID first
+            device = None
+            try:
+                response = await unifi_client.get_v1(f"devices/{device_id}")
+                # v1 may return device directly or wrapped in data
+                if "data" in response and isinstance(response["data"], list):
+                    devices = response["data"]
+                    device = devices[0] if devices else None
+                elif "data" in response and isinstance(response["data"], dict):
+                    device = response["data"]
+                else:
+                    # Response is the device itself
+                    device = response
+            except Exception as lookup_err:
+                logger.debug(f"Direct v1 lookup failed for '{device_id}': {lookup_err}")
+                # Fallback: fetch all devices and search by ID or MAC
+                device = await self._find_device_fallback(unifi_client, device_id)
             
             if not device:
                 raise ToolError(
@@ -309,7 +349,6 @@ class GetDeviceDetailsTool(BaseTool):
             )
         
         except ToolError:
-            # Re-raise tool errors
             raise
         
         except Exception as e:
@@ -332,6 +371,8 @@ class GetDeviceDetailsTool(BaseTool):
     ) -> Optional[Dict[str, Any]]:
         """Find a device by ID or MAC address.
         
+        Handles both v1 (id) and legacy (_id) field names.
+        
         Args:
             devices: List of device dictionaries
             device_id: Device ID or MAC address to search for
@@ -342,7 +383,11 @@ class GetDeviceDetailsTool(BaseTool):
         device_id_lower = device_id.lower()
         
         for device in devices:
-            # Check ID
+            # Check v1 ID field
+            if device.get("id", "").lower() == device_id_lower:
+                return device
+            
+            # Check legacy ID field
             if device.get("_id", "").lower() == device_id_lower:
                 return device
             
@@ -355,27 +400,54 @@ class GetDeviceDetailsTool(BaseTool):
         
         return None
     
+    async def _find_device_fallback(
+        self,
+        unifi_client: UniFiClient,
+        device_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Fallback: fetch all devices via v1 API and search by ID or MAC.
+        
+        Used when direct v1 lookup by ID fails (e.g., when searching by MAC).
+        
+        Args:
+            unifi_client: UniFi API client
+            device_id: Device ID or MAC address to search for
+        
+        Returns:
+            Device dictionary if found, None otherwise
+        """
+        response = await unifi_client.get_v1("devices")
+        devices = response.get("data", [])
+        return self._find_device(devices, device_id)
+    
     def _format_device_details(self, device: Dict[str, Any]) -> Dict[str, Any]:
         """Format device data for detailed view (AI-friendly).
         
         Includes more comprehensive information than the summary view,
         but still filters out unnecessary fields to keep context window
-        usage reasonable.
+        usage reasonable. Handles both v1 and legacy field names.
         
         Args:
-            device: Raw device data from UniFi API
+            device: Raw device data from UniFi API (v1 or legacy)
         
         Returns:
             Formatted device details
         """
+        # Handle state field: v1 uses "ONLINE"/"OFFLINE" strings, legacy uses 1/0 integers
+        state = device.get("state", 0)
+        if isinstance(state, str):
+            status = "online" if state.upper() == "ONLINE" else "offline"
+        else:
+            status = "online" if state == 1 else "offline"
+        
         # Basic information
         details = {
-            "id": device.get("_id", ""),
+            "id": device.get("id", device.get("_id", "")),
             "mac": device.get("mac", ""),
             "name": device.get("name", device.get("hostname", "Unknown")),
             "type": self._get_device_type_friendly(device.get("type", "")),
             "model": device.get("model", ""),
-            "model_name": device.get("model_name", ""),
+            "model_name": device.get("model_name", device.get("modelName", "")),
             
             # Network information
             "ip": device.get("ip", ""),
@@ -383,19 +455,19 @@ class GetDeviceDetailsTool(BaseTool):
             "gateway": device.get("gateway", ""),
             
             # Status
-            "status": "online" if device.get("state", 0) == 1 else "offline",
+            "status": status,
             "adopted": device.get("adopted", False),
             "uptime": device.get("uptime", 0),
             "uptime_readable": self._format_uptime(device.get("uptime", 0)),
             
             # Version information
-            "version": device.get("version", ""),
+            "version": device.get("version", device.get("firmwareVersion", "")),
             "upgradable": device.get("upgradable", False),
             "upgrade_to_version": device.get("upgrade_to_firmware", ""),
             
             # Hardware information
             "serial": device.get("serial", ""),
-            "board_rev": device.get("board_rev", ""),
+            "board_rev": device.get("board_rev", device.get("boardRevision", "")),
             
             # Statistics
             "cpu_usage": device.get("system-stats", {}).get("cpu", 0),
@@ -534,6 +606,133 @@ class GetDeviceDetailsTool(BaseTool):
 
 
 
+class ListPendingDevicesTool(BaseTool):
+    """List devices pending adoption.
+    
+    This tool retrieves devices that have been discovered but not yet
+    adopted into the UniFi network. Useful for identifying new hardware
+    that needs to be set up.
+    
+    Example usage:
+        - "Are there any devices waiting to be adopted?"
+        - "Show me pending devices"
+    """
+    
+    name = "unifi_list_pending_devices"
+    description = "List UniFi devices pending adoption"
+    category = "network_discovery"
+    
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "offset": {
+                "type": "integer",
+                "description": "Number of items to skip (v1 pagination)",
+                "minimum": 0
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of items to return (v1 pagination)",
+                "minimum": 1
+            },
+            "filter": {
+                "type": "string",
+                "description": "Filter expression for v1 API"
+            }
+        }
+    }
+    
+    async def execute(
+        self,
+        unifi_client: UniFiClient,
+        offset: Optional[int] = None,
+        limit: Optional[int] = None,
+        filter_expr: Optional[str] = None,
+        **kwargs: Any
+    ) -> Dict[str, Any]:
+        """Execute the list pending devices tool.
+        
+        Args:
+            unifi_client: UniFi API client
+            offset: Number of items to skip (v1 pagination)
+            limit: Maximum number of items to return (v1 pagination)
+            filter_expr: Filter expression for v1 API
+            **kwargs: Additional arguments (ignored)
+        
+        Returns:
+            Formatted list of pending devices
+        """
+        try:
+            logger.info("Fetching pending devices")
+            
+            # Handle 'filter' kwarg from MCP input schema
+            if filter_expr is None and "filter" in kwargs:
+                filter_expr = kwargs.pop("filter")
+
+            params: Dict[str, Any] = {}
+            if offset is not None:
+                params["offset"] = offset
+            if limit is not None:
+                params["limit"] = limit
+            if filter_expr is not None:
+                params["filter"] = filter_expr
+
+            response = await unifi_client.get_v1(
+                "devices/pending", params=params if params else None
+            )
+            
+            # Extract device data from v1 response envelope
+            devices = response.get("data", [])
+            total_count = response.get("totalCount", len(devices))
+            
+            logger.debug(f"Retrieved {len(devices)} pending devices (totalCount={total_count})")
+            
+            # Format pending devices for AI consumption
+            formatted_devices = [
+                self._format_pending_device(device)
+                for device in devices
+            ]
+            
+            logger.info(f"Returning {len(formatted_devices)} pending devices")
+            
+            return self.format_list(
+                items=formatted_devices,
+                total=len(formatted_devices),
+                page=1,
+                page_size=len(formatted_devices) or 1
+            )
+        
+        except Exception as e:
+            logger.error(f"Failed to list pending devices: {e}", exc_info=True)
+            raise ToolError(
+                code="API_ERROR",
+                message="Failed to retrieve pending device list",
+                details=str(e),
+                actionable_steps=[
+                    "Check UniFi controller is accessible",
+                    "Verify network connectivity",
+                    "Check server logs for details"
+                ]
+            )
+    
+    def _format_pending_device(self, device: Dict[str, Any]) -> Dict[str, Any]:
+        """Format pending device data for summary view.
+        
+        Args:
+            device: Raw pending device data from UniFi v1 API
+        
+        Returns:
+            Formatted pending device summary
+        """
+        return {
+            "id": device.get("id", device.get("_id", "")),
+            "mac": device.get("mac", ""),
+            "name": device.get("name", device.get("model", "Unknown")),
+            "model": device.get("model", ""),
+            "type": device.get("type", ""),
+        }
+
+
 class ListClientsTool(BaseTool):
     """List all connected clients with optional filtering.
     
@@ -551,9 +750,6 @@ class ListClientsTool(BaseTool):
     name = "unifi_list_clients"
     description = "List all connected clients across the network with optional filtering"
     category = "network_discovery"
-    
-    # Fields to include in concise response format
-    CONCISE_FIELDS = ["mac", "name", "ip", "connection_type"]
     
     input_schema = {
         "type": "object",
@@ -577,11 +773,19 @@ class ListClientsTool(BaseTool):
                 "maximum": 500,
                 "default": 50
             },
-            "response_format": {
+            "offset": {
+                "type": "integer",
+                "description": "Number of items to skip (v1 pagination)",
+                "minimum": 0
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of items to return (v1 pagination)",
+                "minimum": 1
+            },
+            "filter": {
                 "type": "string",
-                "enum": ["detailed", "concise"],
-                "description": "Response format: 'detailed' for all fields, 'concise' for essential fields only",
-                "default": "detailed"
+                "description": "Filter expression for v1 API"
             }
         }
     }
@@ -592,7 +796,9 @@ class ListClientsTool(BaseTool):
         connection_type: str = "all",
         page: int = 1,
         page_size: int = 50,
-        response_format: str = "detailed",
+        offset: Optional[int] = None,
+        limit: Optional[int] = None,
+        filter_expr: Optional[str] = None,
         **kwargs: Any
     ) -> Dict[str, Any]:
         """Execute the list clients tool.
@@ -602,25 +808,41 @@ class ListClientsTool(BaseTool):
             connection_type: Filter by connection type (all, wired, wireless)
             page: Page number for pagination
             page_size: Number of clients per page
-            response_format: "detailed" or "concise" response format
+            offset: Number of items to skip (v1 pagination)
+            limit: Maximum number of items to return (v1 pagination)
+            filter_expr: Filter expression for v1 API
             **kwargs: Additional arguments (ignored)
         
         Returns:
             Formatted list of clients with pagination info
         """
         try:
-            # Fetch clients from UniFi controller
+            # Fetch clients from UniFi controller via v1 API
             logger.info(
-                f"Fetching clients (type={connection_type}, page={page}, "
-                f"page_size={page_size}, format={response_format})"
+                f"Fetching clients (type={connection_type}, page={page}, page_size={page_size})"
             )
             
-            response = await unifi_client.get(f"/api/s/{{site}}/stat/sta")
+            # Handle 'filter' kwarg from MCP input schema
+            if filter_expr is None and "filter" in kwargs:
+                filter_expr = kwargs.pop("filter")
+
+            params: Dict[str, Any] = {}
+            if offset is not None:
+                params["offset"] = offset
+            if limit is not None:
+                params["limit"] = limit
+            if filter_expr is not None:
+                params["filter"] = filter_expr
+
+            response = await unifi_client.get_v1(
+                "clients", params=params if params else None
+            )
             
-            # Extract client data from response
+            # Extract client data from v1 response envelope
             clients = response.get("data", [])
+            total_count = response.get("totalCount", len(clients))
             
-            logger.debug(f"Retrieved {len(clients)} clients from controller")
+            logger.debug(f"Retrieved {len(clients)} clients from controller (totalCount={total_count})")
             
             # Filter by connection type if specified
             if connection_type != "all":
@@ -641,13 +863,11 @@ class ListClientsTool(BaseTool):
                 f"(page {page}/{(total + page_size - 1) // page_size}, total={total})"
             )
             
-            return self.format_list_with_truncation(
+            return self.format_list(
                 items=paginated_clients,
                 total=total,
                 page=page,
-                page_size=page_size,
-                response_format=response_format,
-                concise_fields=self.CONCISE_FIELDS
+                page_size=page_size
             )
         
         except Exception as e:
@@ -695,14 +915,20 @@ class ListClientsTool(BaseTool):
         
         Extracts only the most relevant fields for AI consumption,
         avoiding overwhelming the context window with unnecessary data.
+        Handles both v1 and legacy field names gracefully.
         
         Args:
-            client: Raw client data from UniFi API
+            client: Raw client data from UniFi API (v1 or legacy)
         
         Returns:
             Formatted client summary
         """
-        is_wired = client.get("is_wired", False)
+        # v1 uses "type": "WIRED"/"WIRELESS", legacy uses "is_wired": bool
+        client_type = client.get("type", "")
+        if isinstance(client_type, str) and client_type.upper() in ("WIRED", "WIRELESS"):
+            is_wired = client_type.upper() == "WIRED"
+        else:
+            is_wired = client.get("is_wired", False)
         
         summary = {
             "mac": client.get("mac", ""),
@@ -820,10 +1046,10 @@ class GetClientDetailsTool(BaseTool):
             Formatted client details
         """
         try:
-            # Fetch all clients (UniFi doesn't have a single client endpoint)
             logger.info(f"Fetching details for client: {mac_address}")
             
-            response = await unifi_client.get(f"/api/s/{{site}}/stat/sta")
+            # v1 API doesn't support direct lookup by MAC, so fetch all and search
+            response = await unifi_client.get_v1("clients")
             clients = response.get("data", [])
             
             # Find the specific client by MAC address
@@ -898,15 +1124,20 @@ class GetClientDetailsTool(BaseTool):
         
         Includes more comprehensive information than the summary view,
         but still filters out unnecessary fields to keep context window
-        usage reasonable.
+        usage reasonable. Handles both v1 and legacy field names.
         
         Args:
-            client: Raw client data from UniFi API
+            client: Raw client data from UniFi API (v1 or legacy)
         
         Returns:
             Formatted client details
         """
-        is_wired = client.get("is_wired", False)
+        # v1 uses "type": "WIRED"/"WIRELESS", legacy uses "is_wired": bool
+        client_type = client.get("type", "")
+        if isinstance(client_type, str) and client_type.upper() in ("WIRED", "WIRELESS"):
+            is_wired = client_type.upper() == "WIRED"
+        else:
+            is_wired = client.get("is_wired", False)
         
         # Basic information
         details = {
@@ -917,19 +1148,19 @@ class GetClientDetailsTool(BaseTool):
             
             # Network information
             "network": client.get("network", ""),
-            "network_id": client.get("network_id", ""),
+            "network_id": client.get("network_id", client.get("networkId", "")),
             "vlan": client.get("vlan", 0),
             
             # Device information
             "oui": client.get("oui", ""),
             "manufacturer": client.get("oui", "Unknown"),
-            "os_name": client.get("os_name", ""),
-            "os_class": client.get("os_class", ""),
+            "os_name": client.get("os_name", client.get("osName", "")),
+            "os_class": client.get("os_class", client.get("osClass", "")),
             "device_name": client.get("dev_id_override", client.get("device_name", "")),
             
             # Connection status
-            "first_seen": client.get("first_seen", 0),
-            "last_seen": client.get("last_seen", 0),
+            "first_seen": client.get("first_seen", client.get("firstSeen", 0)),
+            "last_seen": client.get("last_seen", client.get("lastSeen", 0)),
             "uptime": client.get("uptime", 0),
             "uptime_readable": self._format_uptime(client.get("uptime", 0)),
             
@@ -953,7 +1184,7 @@ class GetClientDetailsTool(BaseTool):
                 "bssid": client.get("bssid", ""),
                 "channel": client.get("channel", 0),
                 "radio": client.get("radio", ""),
-                "radio_proto": client.get("radio_proto", ""),
+                "radio_proto": client.get("radio_proto", client.get("radioProto", "")),
                 
                 # Signal information
                 "signal": client.get("signal", 0),
@@ -968,18 +1199,18 @@ class GetClientDetailsTool(BaseTool):
         else:
             # Add wired-specific information
             details.update({
-                "switch_mac": client.get("sw_mac", ""),
-                "switch_port": client.get("sw_port", 0),
+                "switch_mac": client.get("sw_mac", client.get("switchMac", "")),
+                "switch_port": client.get("sw_port", client.get("switchPort", 0)),
                 "wired_rate_mbps": client.get("wired-rx_rate-max", 0),
             })
         
         # Add connected device information
         if client.get("ap_mac"):
             details["connected_device_mac"] = client.get("ap_mac", "")
-            details["connected_device_name"] = client.get("ap_name", "")
-        elif client.get("sw_mac"):
-            details["connected_device_mac"] = client.get("sw_mac", "")
-            details["connected_device_name"] = client.get("sw_name", "")
+            details["connected_device_name"] = client.get("ap_name", client.get("apName", ""))
+        elif client.get("sw_mac") or client.get("switchMac"):
+            details["connected_device_mac"] = client.get("sw_mac", client.get("switchMac", ""))
+            details["connected_device_name"] = client.get("sw_name", client.get("switchName", ""))
         
         return details
     
@@ -1048,33 +1279,69 @@ class ListNetworksTool(BaseTool):
     
     input_schema = {
         "type": "object",
-        "properties": {}
+        "properties": {
+            "offset": {
+                "type": "integer",
+                "description": "Number of items to skip (v1 pagination)",
+                "minimum": 0
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of items to return (v1 pagination)",
+                "minimum": 1
+            },
+            "filter": {
+                "type": "string",
+                "description": "Filter expression for v1 API"
+            }
+        }
     }
     
     async def execute(
         self,
         unifi_client: UniFiClient,
+        offset: Optional[int] = None,
+        limit: Optional[int] = None,
+        filter_expr: Optional[str] = None,
         **kwargs: Any
     ) -> Dict[str, Any]:
         """Execute the list networks tool.
         
         Args:
             unifi_client: UniFi API client
+            offset: Number of items to skip (v1 pagination)
+            limit: Maximum number of items to return (v1 pagination)
+            filter_expr: Filter expression for v1 API
             **kwargs: Additional arguments (ignored)
         
         Returns:
             Formatted list of networks
         """
         try:
-            # Fetch networks from UniFi controller
+            # Fetch networks from UniFi controller via v1 API
             logger.info("Fetching networks")
             
-            response = await unifi_client.get(f"/api/s/{{site}}/rest/networkconf")
+            # Handle 'filter' kwarg from MCP input schema
+            if filter_expr is None and "filter" in kwargs:
+                filter_expr = kwargs.pop("filter")
+
+            params: Dict[str, Any] = {}
+            if offset is not None:
+                params["offset"] = offset
+            if limit is not None:
+                params["limit"] = limit
+            if filter_expr is not None:
+                params["filter"] = filter_expr
+
+            response = await unifi_client.get_v1(
+                "networks", params=params if params else None
+            )
             
-            # Extract network data from response
+            # Extract network data from v1 response envelope
             networks = response.get("data", [])
+            total_count = response.get("totalCount", len(networks))
             
-            logger.debug(f"Retrieved {len(networks)} networks from controller")
+            logger.debug(f"Retrieved {len(networks)} networks from controller (totalCount={total_count})")
             
             # Format networks for AI consumption (summary view)
             formatted_networks = [
@@ -1086,7 +1353,7 @@ class ListNetworksTool(BaseTool):
             
             return self.format_list(
                 items=formatted_networks,
-                total=len(formatted_networks),
+                total=total_count,
                 page=1,
                 page_size=len(formatted_networks)
             )
@@ -1107,24 +1374,26 @@ class ListNetworksTool(BaseTool):
     def _format_network_summary(self, network: Dict[str, Any]) -> Dict[str, Any]:
         """Format network data for summary view (AI-friendly).
         
+        Handles both v1 and legacy field names.
+        
         Args:
-            network: Raw network data from UniFi API
+            network: Raw network data from UniFi API (v1 or legacy)
         
         Returns:
             Formatted network summary
         """
         return {
-            "id": network.get("_id", ""),
+            "id": network.get("id", network.get("_id", "")),
             "name": network.get("name", ""),
             "purpose": network.get("purpose", ""),
-            "vlan": network.get("vlan", ""),
-            "vlan_enabled": network.get("vlan_enabled", False),
-            "ip_subnet": network.get("ip_subnet", ""),
-            "network_group": network.get("networkgroup", ""),
-            "dhcp_enabled": network.get("dhcpd_enabled", False),
-            "dhcp_start": network.get("dhcpd_start", ""),
-            "dhcp_stop": network.get("dhcpd_stop", ""),
-            "domain_name": network.get("domain_name", ""),
+            "vlan": network.get("vlan", network.get("vlanId", "")),
+            "vlan_enabled": network.get("vlan_enabled", network.get("vlanId") is not None),
+            "ip_subnet": network.get("ip_subnet", network.get("ipSubnet", "")),
+            "network_group": network.get("networkgroup", network.get("networkGroup", "")),
+            "dhcp_enabled": network.get("dhcpd_enabled", network.get("dhcpEnabled", False)),
+            "dhcp_start": network.get("dhcpd_start", network.get("dhcpStart", "")),
+            "dhcp_stop": network.get("dhcpd_stop", network.get("dhcpStop", "")),
+            "domain_name": network.get("domain_name", network.get("domainName", "")),
             "enabled": network.get("enabled", True),
         }
 
@@ -1175,14 +1444,24 @@ class GetNetworkDetailsTool(BaseTool):
             Formatted network details
         """
         try:
-            # Fetch all networks (UniFi doesn't have a single network endpoint)
             logger.info(f"Fetching details for network: {network_id}")
             
-            response = await unifi_client.get(f"/api/s/{{site}}/rest/networkconf")
-            networks = response.get("data", [])
-            
-            # Find the specific network by ID
-            network = self._find_network(networks, network_id)
+            # Try direct v1 lookup by network ID first
+            network = None
+            try:
+                response = await unifi_client.get_v1(f"networks/{network_id}")
+                # v1 may return network directly or wrapped in data
+                if "data" in response and isinstance(response["data"], list):
+                    networks = response["data"]
+                    network = networks[0] if networks else None
+                elif "data" in response and isinstance(response["data"], dict):
+                    network = response["data"]
+                else:
+                    network = response
+            except Exception as lookup_err:
+                logger.debug(f"Direct v1 lookup failed for '{network_id}': {lookup_err}")
+                # Fallback: fetch all networks and search by ID or name
+                network = await self._find_network_fallback(unifi_client, network_id)
             
             if not network:
                 raise ToolError(
@@ -1229,11 +1508,13 @@ class GetNetworkDetailsTool(BaseTool):
         networks: List[Dict[str, Any]],
         network_id: str
     ) -> Optional[Dict[str, Any]]:
-        """Find a network by ID.
+        """Find a network by ID or name.
+        
+        Handles both v1 (id) and legacy (_id) field names.
         
         Args:
             networks: List of network dictionaries
-            network_id: Network ID to search for
+            network_id: Network ID or name to search for
         
         Returns:
             Network dictionary if found, None otherwise
@@ -1241,7 +1522,11 @@ class GetNetworkDetailsTool(BaseTool):
         network_id_lower = network_id.lower()
         
         for network in networks:
-            # Check ID
+            # Check v1 ID field
+            if network.get("id", "").lower() == network_id_lower:
+                return network
+            
+            # Check legacy ID field
             if network.get("_id", "").lower() == network_id_lower:
                 return network
             
@@ -1251,69 +1536,102 @@ class GetNetworkDetailsTool(BaseTool):
         
         return None
     
+    async def _find_network_fallback(
+        self,
+        unifi_client: UniFiClient,
+        network_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Fallback: fetch all networks via v1 API and search by ID or name.
+        
+        Used when direct v1 lookup by ID fails (e.g., when searching by name).
+        
+        Args:
+            unifi_client: UniFi API client
+            network_id: Network ID or name to search for
+        
+        Returns:
+            Network dictionary if found, None otherwise
+        """
+        response = await unifi_client.get_v1("networks")
+        networks = response.get("data", [])
+        return self._find_network(networks, network_id)
+    
     def _format_network_details(self, network: Dict[str, Any]) -> Dict[str, Any]:
         """Format network data for detailed view (AI-friendly).
         
+        Handles both v1 and legacy field names. Includes new v1 fields
+        (vlanId, dhcpGuarding, management, default) when present.
+        
         Args:
-            network: Raw network data from UniFi API
+            network: Raw network data from UniFi API (v1 or legacy)
         
         Returns:
             Formatted network details
         """
         details = {
-            "id": network.get("_id", ""),
+            "id": network.get("id", network.get("_id", "")),
             "name": network.get("name", ""),
             "purpose": network.get("purpose", ""),
             
-            # VLAN configuration
-            "vlan": network.get("vlan", ""),
-            "vlan_enabled": network.get("vlan_enabled", False),
+            # VLAN configuration (v1 uses vlanId, legacy uses vlan)
+            "vlan": network.get("vlan", network.get("vlanId", "")),
+            "vlan_enabled": network.get("vlan_enabled", network.get("vlanId") is not None),
             
             # IP configuration
-            "ip_subnet": network.get("ip_subnet", ""),
-            "gateway_ip": network.get("gateway_ip", ""),
-            "gateway_type": network.get("gateway_type", ""),
-            "network_group": network.get("networkgroup", ""),
+            "ip_subnet": network.get("ip_subnet", network.get("ipSubnet", "")),
+            "gateway_ip": network.get("gateway_ip", network.get("gatewayIp", "")),
+            "gateway_type": network.get("gateway_type", network.get("gatewayType", "")),
+            "network_group": network.get("networkgroup", network.get("networkGroup", "")),
             
-            # DHCP configuration
-            "dhcp_enabled": network.get("dhcpd_enabled", False),
-            "dhcp_start": network.get("dhcpd_start", ""),
-            "dhcp_stop": network.get("dhcpd_stop", ""),
-            "dhcp_lease_time": network.get("dhcpd_leasetime", 0),
-            "dhcp_dns": network.get("dhcpd_dns", []),
-            "dhcp_gateway": network.get("dhcpd_gateway", ""),
+            # DHCP configuration (v1 uses camelCase)
+            "dhcp_enabled": network.get("dhcpd_enabled", network.get("dhcpEnabled", False)),
+            "dhcp_start": network.get("dhcpd_start", network.get("dhcpStart", "")),
+            "dhcp_stop": network.get("dhcpd_stop", network.get("dhcpStop", "")),
+            "dhcp_lease_time": network.get("dhcpd_leasetime", network.get("dhcpLeaseTime", 0)),
+            "dhcp_dns": network.get("dhcpd_dns", network.get("dhcpDns", [])),
+            "dhcp_gateway": network.get("dhcpd_gateway", network.get("dhcpGateway", "")),
             
             # DNS configuration
-            "domain_name": network.get("domain_name", ""),
-            "dns_servers": network.get("dhcpd_dns", []),
+            "domain_name": network.get("domain_name", network.get("domainName", "")),
+            "dns_servers": network.get("dhcpd_dns", network.get("dhcpDns", [])),
             
             # Network settings
             "enabled": network.get("enabled", True),
-            "is_nat": network.get("is_nat", False),
-            "is_guest": network.get("is_guest", False),
-            "igmp_snooping": network.get("igmp_snooping", False),
-            "dhcp_relay_enabled": network.get("dhcp_relay_enabled", False),
+            "is_nat": network.get("is_nat", network.get("isNat", False)),
+            "is_guest": network.get("is_guest", network.get("isGuest", False)),
+            "igmp_snooping": network.get("igmp_snooping", network.get("igmpSnooping", False)),
+            "dhcp_relay_enabled": network.get("dhcp_relay_enabled", network.get("dhcpRelayEnabled", False)),
             
             # IPv6 settings (if configured)
-            "ipv6_interface_type": network.get("ipv6_interface_type", ""),
-            "ipv6_pd_start": network.get("ipv6_pd_start", ""),
-            "ipv6_pd_stop": network.get("ipv6_pd_stop", ""),
+            "ipv6_interface_type": network.get("ipv6_interface_type", network.get("ipv6InterfaceType", "")),
+            "ipv6_pd_start": network.get("ipv6_pd_start", network.get("ipv6PdStart", "")),
+            "ipv6_pd_stop": network.get("ipv6_pd_stop", network.get("ipv6PdStop", "")),
         }
         
+        # New v1-specific fields — include when present
+        if "vlanId" in network:
+            details["vlanId"] = network["vlanId"]
+        if "dhcpGuarding" in network:
+            details["dhcpGuarding"] = network["dhcpGuarding"]
+        if "management" in network:
+            details["management"] = network["management"]
+        if "default" in network:
+            details["default"] = network["default"]
+        
         # Add DHCP options if present
-        if network.get("dhcpd_options"):
-            details["dhcp_options"] = network.get("dhcpd_options", [])
+        if network.get("dhcpd_options") or network.get("dhcpOptions"):
+            details["dhcp_options"] = network.get("dhcpd_options", network.get("dhcpOptions", []))
         
         return details
 
 
 
 class ListWLANsTool(BaseTool):
-    """List all configured wireless networks (WLANs).
+    """List all configured WiFi broadcasts (wireless networks).
     
-    This tool retrieves all wireless networks configured in the UniFi controller,
-    including SSIDs, security settings, and VLAN assignments. Provides summary
-    information optimized for AI consumption.
+    This tool retrieves all WiFi broadcasts configured in the UniFi controller
+    via the v1 integration API, including SSIDs, security settings, and VLAN
+    assignments. Provides summary information optimized for AI consumption.
     
     Example usage:
         - "List all wireless networks"
@@ -1322,59 +1640,95 @@ class ListWLANsTool(BaseTool):
     """
     
     name = "unifi_list_wlans"
-    description = "List all configured wireless networks (WLANs)"
+    description = "List all configured WiFi broadcasts (wireless networks)"
     category = "network_discovery"
     
     input_schema = {
         "type": "object",
-        "properties": {}
+        "properties": {
+            "offset": {
+                "type": "integer",
+                "description": "Number of items to skip (v1 pagination)",
+                "minimum": 0
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of items to return (v1 pagination)",
+                "minimum": 1
+            },
+            "filter": {
+                "type": "string",
+                "description": "Filter expression for v1 API"
+            }
+        }
     }
     
     async def execute(
         self,
         unifi_client: UniFiClient,
+        offset: Optional[int] = None,
+        limit: Optional[int] = None,
+        filter_expr: Optional[str] = None,
         **kwargs: Any
     ) -> Dict[str, Any]:
         """Execute the list WLANs tool.
         
         Args:
             unifi_client: UniFi API client
+            offset: Number of items to skip (v1 pagination)
+            limit: Maximum number of items to return (v1 pagination)
+            filter_expr: Filter expression for v1 API
             **kwargs: Additional arguments (ignored)
         
         Returns:
-            Formatted list of WLANs
+            Formatted list of WiFi broadcasts
         """
         try:
-            # Fetch WLANs from UniFi controller
-            logger.info("Fetching WLANs")
+            # Fetch WiFi broadcasts from UniFi controller via v1 API
+            logger.info("Fetching WiFi broadcasts")
             
-            response = await unifi_client.get(f"/api/s/{{site}}/rest/wlanconf")
+            # Handle 'filter' kwarg from MCP input schema
+            if filter_expr is None and "filter" in kwargs:
+                filter_expr = kwargs.pop("filter")
+
+            params: Dict[str, Any] = {}
+            if offset is not None:
+                params["offset"] = offset
+            if limit is not None:
+                params["limit"] = limit
+            if filter_expr is not None:
+                params["filter"] = filter_expr
+
+            response = await unifi_client.get_v1(
+                "wifi/broadcasts", params=params if params else None
+            )
             
-            # Extract WLAN data from response
+            # Extract broadcast data from v1 response envelope
             wlans = response.get("data", [])
+            total_count = response.get("totalCount", len(wlans))
             
-            logger.debug(f"Retrieved {len(wlans)} WLANs from controller")
+            logger.debug(f"Retrieved {len(wlans)} WiFi broadcasts from controller (totalCount={total_count})")
             
-            # Format WLANs for AI consumption (summary view)
+            # Format broadcasts for AI consumption (summary view)
             formatted_wlans = [
                 self._format_wlan_summary(wlan)
                 for wlan in wlans
             ]
             
-            logger.info(f"Returning {len(formatted_wlans)} WLANs")
+            logger.info(f"Returning {len(formatted_wlans)} WiFi broadcasts")
             
             return self.format_list(
                 items=formatted_wlans,
-                total=len(formatted_wlans),
+                total=total_count,
                 page=1,
                 page_size=len(formatted_wlans)
             )
         
         except Exception as e:
-            logger.error(f"Failed to list WLANs: {e}", exc_info=True)
+            logger.error(f"Failed to list WiFi broadcasts: {e}", exc_info=True)
             raise ToolError(
                 code="API_ERROR",
-                message="Failed to retrieve WLAN list",
+                message="Failed to retrieve WiFi broadcast list",
                 details=str(e),
                 actionable_steps=[
                     "Check UniFi controller is accessible",
@@ -1385,37 +1739,39 @@ class ListWLANsTool(BaseTool):
 
     
     def _format_wlan_summary(self, wlan: Dict[str, Any]) -> Dict[str, Any]:
-        """Format WLAN data for summary view (AI-friendly).
+        """Format WiFi broadcast data for summary view (AI-friendly).
+        
+        Handles both v1 and legacy field names.
         
         Args:
-            wlan: Raw WLAN data from UniFi API
+            wlan: Raw WiFi broadcast data from UniFi API (v1 or legacy)
         
         Returns:
-            Formatted WLAN summary
+            Formatted WiFi broadcast summary
         """
         return {
-            "id": wlan.get("_id", ""),
+            "id": wlan.get("id", wlan.get("_id", "")),
             "name": wlan.get("name", ""),
-            "ssid": wlan.get("x_passphrase", wlan.get("name", "")),
+            "ssid": wlan.get("ssid", wlan.get("x_passphrase", wlan.get("name", ""))),
             "enabled": wlan.get("enabled", True),
             "security": wlan.get("security", ""),
-            "wpa_mode": wlan.get("wpa_mode", ""),
-            "wpa_enc": wlan.get("wpa_enc", ""),
-            "network_id": wlan.get("networkconf_id", ""),
+            "wpa_mode": wlan.get("wpaMode", wlan.get("wpa_mode", "")),
+            "wpa_enc": wlan.get("wpaEnc", wlan.get("wpa_enc", "")),
+            "network_id": wlan.get("networkId", wlan.get("networkconf_id", "")),
             "vlan": wlan.get("vlan", ""),
-            "vlan_enabled": wlan.get("vlan_enabled", False),
-            "is_guest": wlan.get("is_guest", False),
-            "hide_ssid": wlan.get("hide_ssid", False),
+            "vlan_enabled": wlan.get("vlanEnabled", wlan.get("vlan_enabled", False)),
+            "is_guest": wlan.get("isGuest", wlan.get("is_guest", False)),
+            "hide_ssid": wlan.get("hideSsid", wlan.get("hide_ssid", False)),
         }
 
 
 
 class GetWLANDetailsTool(BaseTool):
-    """Get detailed information about a specific WLAN.
+    """Get detailed information about a specific WiFi broadcast.
     
-    This tool retrieves comprehensive information about a single wireless network
-    including security settings, radio configuration, and advanced options.
-    Use this after listing WLANs to get full details about a specific WLAN.
+    This tool retrieves comprehensive information about a single WiFi broadcast
+    via the v1 integration API, including security settings, radio configuration,
+    and advanced options. Uses direct v1 lookup by ID with fallback to list+search.
     
     Example usage:
         - "Show me details for WLAN abc123"
@@ -1424,7 +1780,7 @@ class GetWLANDetailsTool(BaseTool):
     """
     
     name = "unifi_get_wlan_details"
-    description = "Get detailed information about a specific WLAN"
+    description = "Get detailed information about a specific WiFi broadcast"
     category = "network_discovery"
     
     input_schema = {
@@ -1432,7 +1788,7 @@ class GetWLANDetailsTool(BaseTool):
         "properties": {
             "wlan_id": {
                 "type": "string",
-                "description": "WLAN ID"
+                "description": "WiFi broadcast ID or name"
             }
         },
         "required": ["wlan_id"]
@@ -1444,42 +1800,52 @@ class GetWLANDetailsTool(BaseTool):
         wlan_id: str,
         **kwargs: Any
     ) -> Dict[str, Any]:
-        """Execute the get WLAN details tool.
+        """Execute the get WiFi broadcast details tool.
         
         Args:
             unifi_client: UniFi API client
-            wlan_id: WLAN ID
+            wlan_id: WiFi broadcast ID or name
             **kwargs: Additional arguments (ignored)
         
         Returns:
-            Formatted WLAN details
+            Formatted WiFi broadcast details
         """
         try:
-            # Fetch all WLANs (UniFi doesn't have a single WLAN endpoint)
-            logger.info(f"Fetching details for WLAN: {wlan_id}")
+            logger.info(f"Fetching details for WiFi broadcast: {wlan_id}")
             
-            response = await unifi_client.get(f"/api/s/{{site}}/rest/wlanconf")
-            wlans = response.get("data", [])
-            
-            # Find the specific WLAN by ID
-            wlan = self._find_wlan(wlans, wlan_id)
+            # Try direct v1 lookup by broadcast ID first
+            wlan = None
+            try:
+                response = await unifi_client.get_v1(f"wifi/broadcasts/{wlan_id}")
+                # v1 may return broadcast directly or wrapped in data
+                if "data" in response and isinstance(response["data"], list):
+                    wlans = response["data"]
+                    wlan = wlans[0] if wlans else None
+                elif "data" in response and isinstance(response["data"], dict):
+                    wlan = response["data"]
+                else:
+                    wlan = response
+            except Exception as lookup_err:
+                logger.debug(f"Direct v1 lookup failed for '{wlan_id}': {lookup_err}")
+                # Fallback: fetch all broadcasts and search by ID or name
+                wlan = await self._find_wlan_fallback(unifi_client, wlan_id)
             
             if not wlan:
                 raise ToolError(
                     code="WLAN_NOT_FOUND",
-                    message=f"WLAN not found: {wlan_id}",
-                    details=f"No WLAN found with ID '{wlan_id}'",
+                    message=f"WiFi broadcast not found: {wlan_id}",
+                    details=f"No WiFi broadcast found with ID '{wlan_id}'",
                     actionable_steps=[
-                        "Verify the WLAN ID is correct",
-                        "Use unifi_list_wlans to see available WLANs",
-                        "Check if the WLAN is enabled"
+                        "Verify the broadcast ID is correct",
+                        "Use unifi_list_wlans to see available WiFi broadcasts",
+                        "Check if the broadcast is enabled"
                     ]
                 )
             
-            # Format WLAN details for AI consumption
+            # Format broadcast details for AI consumption
             formatted_wlan = self._format_wlan_details(wlan)
             
-            logger.info(f"Retrieved details for WLAN: {formatted_wlan['name']}")
+            logger.info(f"Retrieved details for WiFi broadcast: {formatted_wlan['name']}")
             
             return self.format_detail(
                 item=formatted_wlan,
@@ -1491,14 +1857,14 @@ class GetWLANDetailsTool(BaseTool):
             raise
         
         except Exception as e:
-            logger.error(f"Failed to get WLAN details: {e}", exc_info=True)
+            logger.error(f"Failed to get WiFi broadcast details: {e}", exc_info=True)
             raise ToolError(
                 code="API_ERROR",
-                message="Failed to retrieve WLAN details",
+                message="Failed to retrieve WiFi broadcast details",
                 details=str(e),
                 actionable_steps=[
                     "Check UniFi controller is accessible",
-                    "Verify the WLAN ID is correct",
+                    "Verify the broadcast ID is correct",
                     "Check server logs for details"
                 ]
             )
@@ -1508,19 +1874,25 @@ class GetWLANDetailsTool(BaseTool):
         wlans: List[Dict[str, Any]],
         wlan_id: str
     ) -> Optional[Dict[str, Any]]:
-        """Find a WLAN by ID.
+        """Find a WiFi broadcast by ID or name.
+        
+        Handles both v1 (id) and legacy (_id) field names.
         
         Args:
-            wlans: List of WLAN dictionaries
-            wlan_id: WLAN ID to search for
+            wlans: List of WiFi broadcast dictionaries
+            wlan_id: Broadcast ID or name to search for
         
         Returns:
-            WLAN dictionary if found, None otherwise
+            Broadcast dictionary if found, None otherwise
         """
         wlan_id_lower = wlan_id.lower()
         
         for wlan in wlans:
-            # Check ID
+            # Check v1 ID field
+            if wlan.get("id", "").lower() == wlan_id_lower:
+                return wlan
+            
+            # Check legacy ID field
             if wlan.get("_id", "").lower() == wlan_id_lower:
                 return wlan
             
@@ -1530,76 +1902,99 @@ class GetWLANDetailsTool(BaseTool):
         
         return None
 
-    
-    def _format_wlan_details(self, wlan: Dict[str, Any]) -> Dict[str, Any]:
-        """Format WLAN data for detailed view (AI-friendly).
+    async def _find_wlan_fallback(
+        self,
+        unifi_client: UniFiClient,
+        wlan_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Fallback: fetch all WiFi broadcasts via v1 API and search by ID or name.
+        
+        Used when direct v1 lookup by ID fails (e.g., when searching by name).
         
         Args:
-            wlan: Raw WLAN data from UniFi API
+            unifi_client: UniFi API client
+            wlan_id: Broadcast ID or name to search for
         
         Returns:
-            Formatted WLAN details
+            Broadcast dictionary if found, None otherwise
+        """
+        response = await unifi_client.get_v1("wifi/broadcasts")
+        wlans = response.get("data", [])
+        return self._find_wlan(wlans, wlan_id)
+
+    
+    def _format_wlan_details(self, wlan: Dict[str, Any]) -> Dict[str, Any]:
+        """Format WiFi broadcast data for detailed view (AI-friendly).
+        
+        Handles both v1 and legacy field names.
+        
+        Args:
+            wlan: Raw WiFi broadcast data from UniFi API (v1 or legacy)
+        
+        Returns:
+            Formatted WiFi broadcast details
         """
         details = {
-            "id": wlan.get("_id", ""),
+            "id": wlan.get("id", wlan.get("_id", "")),
             "name": wlan.get("name", ""),
-            "ssid": wlan.get("x_passphrase", wlan.get("name", "")),
+            "ssid": wlan.get("ssid", wlan.get("x_passphrase", wlan.get("name", ""))),
             "enabled": wlan.get("enabled", True),
             
             # Security settings
             "security": wlan.get("security", ""),
-            "wpa_mode": wlan.get("wpa_mode", ""),
-            "wpa_enc": wlan.get("wpa_enc", ""),
-            "wep_idx": wlan.get("wep_idx", 0),
+            "wpa_mode": wlan.get("wpaMode", wlan.get("wpa_mode", "")),
+            "wpa_enc": wlan.get("wpaEnc", wlan.get("wpa_enc", "")),
+            "wep_idx": wlan.get("wepIdx", wlan.get("wep_idx", 0)),
             
             # Network assignment
-            "network_id": wlan.get("networkconf_id", ""),
+            "network_id": wlan.get("networkId", wlan.get("networkconf_id", "")),
             "vlan": wlan.get("vlan", ""),
-            "vlan_enabled": wlan.get("vlan_enabled", False),
+            "vlan_enabled": wlan.get("vlanEnabled", wlan.get("vlan_enabled", False)),
             
             # Guest network settings
-            "is_guest": wlan.get("is_guest", False),
-            "guest_portal_enabled": wlan.get("portal_enabled", False),
-            "guest_portal_customized": wlan.get("portal_customized", False),
+            "is_guest": wlan.get("isGuest", wlan.get("is_guest", False)),
+            "guest_portal_enabled": wlan.get("portalEnabled", wlan.get("portal_enabled", False)),
+            "guest_portal_customized": wlan.get("portalCustomized", wlan.get("portal_customized", False)),
             
             # SSID settings
-            "hide_ssid": wlan.get("hide_ssid", False),
-            "mac_filter_enabled": wlan.get("mac_filter_enabled", False),
-            "mac_filter_policy": wlan.get("mac_filter_policy", ""),
+            "hide_ssid": wlan.get("hideSsid", wlan.get("hide_ssid", False)),
+            "mac_filter_enabled": wlan.get("macFilterEnabled", wlan.get("mac_filter_enabled", False)),
+            "mac_filter_policy": wlan.get("macFilterPolicy", wlan.get("mac_filter_policy", "")),
             
             # Radio settings
-            "minrate_ng_enabled": wlan.get("minrate_ng_enabled", False),
-            "minrate_ng_data_rate_kbps": wlan.get("minrate_ng_data_rate_kbps", 0),
-            "minrate_na_enabled": wlan.get("minrate_na_enabled", False),
-            "minrate_na_data_rate_kbps": wlan.get("minrate_na_data_rate_kbps", 0),
+            "minrate_ng_enabled": wlan.get("minrateNgEnabled", wlan.get("minrate_ng_enabled", False)),
+            "minrate_ng_data_rate_kbps": wlan.get("minrateNgDataRateKbps", wlan.get("minrate_ng_data_rate_kbps", 0)),
+            "minrate_na_enabled": wlan.get("minrateNaEnabled", wlan.get("minrate_na_enabled", False)),
+            "minrate_na_data_rate_kbps": wlan.get("minrateNaDataRateKbps", wlan.get("minrate_na_data_rate_kbps", 0)),
             
             # Advanced settings
-            "dtim_mode": wlan.get("dtim_mode", ""),
-            "dtim_ng": wlan.get("dtim_ng", 0),
-            "dtim_na": wlan.get("dtim_na", 0),
-            "schedule_enabled": wlan.get("schedule_enabled", False),
+            "dtim_mode": wlan.get("dtimMode", wlan.get("dtim_mode", "")),
+            "dtim_ng": wlan.get("dtimNg", wlan.get("dtim_ng", 0)),
+            "dtim_na": wlan.get("dtimNa", wlan.get("dtim_na", 0)),
+            "schedule_enabled": wlan.get("scheduleEnabled", wlan.get("schedule_enabled", False)),
             "schedule": wlan.get("schedule", []),
             
             # Band steering
-            "band_steering_mode": wlan.get("band_steering_mode", ""),
+            "band_steering_mode": wlan.get("bandSteeringMode", wlan.get("band_steering_mode", "")),
             
             # Fast roaming
-            "fast_roaming_enabled": wlan.get("fast_roaming_enabled", False),
+            "fast_roaming_enabled": wlan.get("fastRoamingEnabled", wlan.get("fast_roaming_enabled", False)),
             
             # RADIUS settings (if applicable)
-            "radius_enabled": wlan.get("radius_enabled", False),
-            "radius_nas_id": wlan.get("radius_nas_id", ""),
+            "radius_enabled": wlan.get("radiusEnabled", wlan.get("radius_enabled", False)),
+            "radius_nas_id": wlan.get("radiusNasId", wlan.get("radius_nas_id", "")),
             
             # Group rekey interval
-            "group_rekey": wlan.get("group_rekey", 0),
+            "group_rekey": wlan.get("groupRekey", wlan.get("group_rekey", 0)),
             
             # WPA3 settings
-            "wpa3_support": wlan.get("wpa3_support", False),
-            "wpa3_transition": wlan.get("wpa3_transition", False),
+            "wpa3_support": wlan.get("wpa3Support", wlan.get("wpa3_support", False)),
+            "wpa3_transition": wlan.get("wpa3Transition", wlan.get("wpa3_transition", False)),
         }
         
         # Add MAC filter list if enabled
-        if wlan.get("mac_filter_enabled"):
-            details["mac_filter_list"] = wlan.get("mac_filter_list", [])
+        mac_filter_enabled = wlan.get("macFilterEnabled", wlan.get("mac_filter_enabled"))
+        if mac_filter_enabled:
+            details["mac_filter_list"] = wlan.get("macFilterList", wlan.get("mac_filter_list", []))
         
         return details

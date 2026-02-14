@@ -41,12 +41,6 @@ from unifi_mcp.utils.retry import (
     RetryableError,
     NonRetryableError,
 )
-from unifi_mcp.api import (
-    ControllerType,
-    ControllerDetector,
-    EndpointRouter,
-    ResponseNormalizer,
-)
 
 
 class UniFiClientError(Exception):
@@ -150,10 +144,8 @@ class UniFiClient:
         # Concurrent request limiting
         self._request_semaphore = asyncio.Semaphore(self.max_concurrent_requests)
         
-        # API abstraction layer components (initialized after connection)
-        self._controller_detector: Optional[ControllerDetector] = None
-        self._endpoint_router: Optional[EndpointRouter] = None
-        self._response_normalizer: Optional[ResponseNormalizer] = None
+        # V1 API site ID (UUID, resolved lazily on first v1 request)
+        self._site_id: Optional[str] = None
         
         auth_method = "API Key" if self.use_api_key else "Username/Password"
         self.logger.info(
@@ -170,19 +162,6 @@ class UniFiClient:
                 "max_concurrent_requests": self.max_concurrent_requests,
             }
         )
-    
-    @property
-    def controller_type(self) -> ControllerType:
-        """Get the detected controller type.
-        
-        Returns:
-            ControllerType indicating whether this is UniFi OS or traditional controller.
-            Returns UNKNOWN if detection hasn't been performed yet.
-        """
-        if self._controller_detector is None:
-            return ControllerType.UNKNOWN
-        cached = self._controller_detector.get_cached_type()
-        return cached if cached is not None else ControllerType.UNKNOWN
     
     def _setup_performance_config(self, server_config: Optional[Dict[str, Any]] = None) -> None:
         """Set up performance configuration.
@@ -433,20 +412,9 @@ class UniFiClient:
                 # Session-based auth requires login
                 await self._authenticate()
             
-            # Initialize API abstraction layer components
-            self._controller_detector = ControllerDetector(self)
-            self._endpoint_router = EndpointRouter()
-            self._response_normalizer = ResponseNormalizer()
-            
-            # Detect controller type after authentication
-            detected_type = await self._controller_detector.detect()
-            
             self.logger.info(
                 "Successfully connected to UniFi controller",
-                extra={
-                    "correlation_id": correlation_id,
-                    "controller_type": detected_type.value,
-                }
+                extra={"correlation_id": correlation_id}
             )
         
         except aiohttp.ClientError as e:
@@ -610,6 +578,276 @@ class UniFiClient:
         else:
             return self.base_url + endpoint
     
+    async def resolve_site_id(self) -> str:
+        """Discover and cache the v1 site ID.
+
+        Calls GET /proxy/network/integration/v1/sites and caches
+        the first site's UUID. Called automatically by get_v1().
+
+        Returns:
+            UUID string for the active site
+
+        Raises:
+            UniFiClientError: If no sites found or request fails
+        """
+        if self._site_id is not None:
+            return self._site_id
+
+        self.logger.info("Resolving v1 site ID...")
+
+        # Build URL directly — this is a site-independent endpoint
+        url = f"https://{self.config.host}:{self.config.port}/proxy/network/integration/v1/sites"
+
+        if not self.session:
+            raise UniFiClientError("Not connected. Call connect() first.")
+
+        await self._ensure_authenticated()
+
+        try:
+            request_timeout = aiohttp.ClientTimeout(
+                total=self.request_timeout,
+                connect=self.connection_timeout,
+            )
+
+            async with self.session.get(url, timeout=request_timeout) as response:
+                if response.status == 401 or response.status == 403:
+                    raise AuthenticationError(
+                        "Authentication failed resolving site ID. Verify your API key has site access."
+                    )
+
+                response.raise_for_status()
+                data = await response.json()
+
+        except aiohttp.ClientConnectionError as e:
+            raise ConnectionError(f"Connection error resolving site ID: {e}")
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"Timed out resolving site ID after {self.request_timeout} seconds"
+            )
+        except aiohttp.ClientError as e:
+            raise UniFiClientError(f"Failed to resolve site ID: {e}")
+
+        # v1/sites returns a list of site dicts with 'id' and 'name'
+        sites = data if isinstance(data, list) else data.get("data", [])
+
+        if not sites:
+            raise UniFiClientError(
+                "No sites found. Ensure the API key has site access."
+            )
+
+        self._site_id = sites[0]["id"]
+        self.logger.info(
+            "Resolved v1 site ID",
+            extra={"site_id": self._site_id, "site_name": sites[0].get("name", "unknown")},
+        )
+        return self._site_id
+
+    def _build_v1_url(self, endpoint: str) -> str:
+        """Build a v1 integration API URL.
+
+        Args:
+            endpoint: Path after /sites/{siteId}/, e.g. "firewall/zones".
+                      For site-independent endpoints (e.g. "/v1/sites", "/v1/info"),
+                      pass the full path starting with /v1/.
+
+        Returns:
+            Full URL like
+            https://host:port/proxy/network/integration/v1/sites/{siteId}/firewall/zones
+        """
+        base = f"https://{self.config.host}:{self.config.port}/proxy/network/integration"
+
+        # Site-independent endpoints start with /v1/
+        if endpoint.startswith("/v1/"):
+            return f"{base}{endpoint}"
+
+        # Site-scoped endpoints
+        endpoint = endpoint.lstrip("/")
+        return f"{base}/v1/sites/{self._site_id}/{endpoint}"
+
+    async def get_v1(
+        self,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        use_cache: bool = True,
+    ) -> Dict[str, Any]:
+        """Make GET request to v1 integration API.
+
+        Automatically resolves siteId on first call.
+        Handles v1 response format: { offset, limit, count, totalCount, data }.
+        Uses same retry, caching, and error handling as legacy get().
+
+        Args:
+            endpoint: v1 API path (e.g. "firewall/zones" or "/v1/sites")
+            params: Optional query parameters (offset, limit, filter, etc.)
+            use_cache: Whether to cache the response
+
+        Returns:
+            Full v1 response dict (caller extracts data/totalCount as needed)
+
+        Raises:
+            UniFiClientError: If request fails after retries
+            AuthenticationError: If authentication fails
+            TimeoutError: If request times out after retries
+            RateLimitError: If rate limit is exceeded
+        """
+        if not self.session:
+            raise UniFiClientError("Not connected. Call connect() first.")
+
+        # Resolve site ID for site-scoped endpoints
+        if not endpoint.startswith("/v1/"):
+            await self.resolve_site_id()
+
+        url = self._build_v1_url(endpoint)
+
+        # Check cache
+        cache_key = self._get_cache_key(f"v1:{endpoint}", params)
+        if use_cache and self.cache_enabled and cache_key in self.cache:
+            self.logger.debug(
+                f"Cache hit for v1 {endpoint}",
+                extra={"endpoint": endpoint, "cache_key": cache_key},
+            )
+            return self.cache[cache_key]
+
+        # Use retry logic wrapping the internal request method
+        result = await retry_async(
+            self._get_v1_with_auth,
+            url,
+            endpoint,
+            params,
+            config=self.retry_config,
+        )
+
+        # Cache the result
+        if use_cache and self.cache_enabled:
+            self.cache[cache_key] = result
+            self.logger.debug(
+                f"Cached v1 response for {endpoint}",
+                extra={"endpoint": endpoint, "cache_key": cache_key},
+            )
+
+        return result
+
+    async def _get_v1_with_auth(
+        self,
+        url: str,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Internal v1 GET request with authentication check.
+
+        Mirrors _get_with_auth but uses a pre-built v1 URL and handles
+        the v1 response envelope.
+        """
+        await self._ensure_authenticated()
+
+        async with self._request_semaphore:
+            start_time = time.time()
+
+            self.logger.debug(
+                f"GET v1 request to {endpoint}",
+                extra={"url": url, "params": params},
+            )
+
+            try:
+                request_timeout = aiohttp.ClientTimeout(
+                    total=self.request_timeout,
+                    connect=self.connection_timeout,
+                )
+
+                async with self.session.get(url, params=params, timeout=request_timeout) as response:
+                    if response.status == 401:
+                        self.authenticated = False
+                        self.logger.warning("Session expired (401) on v1 request, will re-authenticate on retry")
+                        raise SessionExpiredError("Session expired, re-authentication required")
+
+                    if response.status == 403:
+                        raise AuthenticationError(
+                            "Insufficient permissions for v1 API. Verify your API key has read access."
+                        )
+
+                    if response.status == 429:
+                        retry_after = response.headers.get("Retry-After", "unknown")
+                        self.logger.warning(
+                            f"Rate limit exceeded (429) on v1 request, retry after: {retry_after}",
+                            extra={"endpoint": endpoint, "retry_after": retry_after},
+                        )
+                        raise RateLimitError(f"Rate limit exceeded. Retry after: {retry_after}")
+
+                    if response.status >= 500:
+                        error_text = await response.text()
+                        self.logger.warning(
+                            f"Server error ({response.status}) on v1 request, will retry",
+                            extra={"endpoint": endpoint, "status": response.status},
+                        )
+                        raise ConnectionError(f"Server error {response.status}: {error_text}")
+
+                    if response.status == 404:
+                        error_text = await response.text()
+                        raise UniFiClientError(f"Resource not found: {endpoint}")
+
+                    # Raise for other 4xx errors
+                    response.raise_for_status()
+
+                    data = await response.json()
+
+                    duration = time.time() - start_time
+                    self.logger.debug(
+                        "GET v1 request successful",
+                        extra={
+                            "endpoint": endpoint,
+                            "status": response.status,
+                            "duration_ms": round(duration * 1000, 2),
+                        },
+                    )
+
+                    if duration > 2.0:
+                        self.logger.warning(
+                            "Slow GET v1 request detected",
+                            extra={
+                                "endpoint": endpoint,
+                                "duration_ms": round(duration * 1000, 2),
+                                "threshold_ms": 2000,
+                            },
+                        )
+
+                    return data
+
+            except asyncio.TimeoutError:
+                duration = time.time() - start_time
+                self.logger.warning(
+                    f"Request timeout for v1 {endpoint}",
+                    extra={
+                        "endpoint": endpoint,
+                        "timeout": self.request_timeout,
+                        "duration_ms": round(duration * 1000, 2),
+                    },
+                )
+                raise TimeoutError(
+                    f"Request to v1 {endpoint} timed out after {self.request_timeout} seconds"
+                )
+
+            except aiohttp.ClientConnectionError as e:
+                duration = time.time() - start_time
+                self.logger.warning(
+                    f"Connection error for v1 {endpoint}: {e}",
+                    extra={
+                        "endpoint": endpoint,
+                        "duration_ms": round(duration * 1000, 2),
+                    },
+                )
+                raise ConnectionError(f"Connection error for v1 {endpoint}: {e}")
+
+            except aiohttp.ClientError as e:
+                duration = time.time() - start_time
+                self.logger.error(
+                    f"GET v1 request failed: {e}",
+                    extra={
+                        "endpoint": endpoint,
+                        "duration_ms": round(duration * 1000, 2),
+                    },
+                )
+                raise UniFiClientError(f"GET v1 request to {endpoint} failed: {e}")
+
     async def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None, use_cache: bool = True) -> Dict[str, Any]:
         """Make GET request to UniFi API with caching and retry logic.
         
@@ -985,161 +1223,3 @@ class UniFiClient:
                     }
                 )
                 raise UniFiClientError(f"POST request to {endpoint} failed: {e}")
-    
-    async def get_security_data(
-        self,
-        feature: str,
-        normalize: bool = True,
-        site: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Get security data with automatic endpoint routing and normalization.
-        
-        This method provides a high-level interface for retrieving security-related
-        data (firewall rules, IPS status, traffic routes, port forwards) with
-        automatic endpoint routing based on the detected controller type.
-        
-        The method:
-        1. Uses the detected controller type to select the correct API endpoint
-        2. Makes the request with automatic fallback to legacy endpoints
-        3. Optionally normalizes the response to a consistent format
-        
-        Args:
-            feature: Security feature to retrieve. Valid values:
-                - "firewall_rules": Firewall rules/traffic routes
-                - "ips_status": IPS/threat management status
-                - "traffic_routes": Traffic routing rules
-                - "port_forwards": Port forwarding rules
-            normalize: Whether to normalize the response (default: True)
-            site: Optional site name (uses client's default if not provided)
-        
-        Returns:
-            Dictionary containing:
-            - data: Response data (normalized if normalize=True)
-            - endpoint_used: The endpoint that succeeded
-            - api_version: "v2" or "v1"
-            - fallback_used: Whether fallback was used
-            - controller_type: Detected controller type
-        
-        Raises:
-            UniFiClientError: If not connected or API layer not initialized
-            ValueError: If feature is not recognized
-            Exception: If both primary and fallback endpoints fail
-        
-        Example:
-            >>> result = await client.get_security_data("firewall_rules")
-            >>> for rule in result["data"]:
-            ...     print(f"{rule['name']}: {rule['action']}")
-        """
-        if not self.session:
-            raise UniFiClientError("Not connected. Call connect() first.")
-        
-        if self._endpoint_router is None:
-            raise UniFiClientError(
-                "API layer not initialized. Ensure connect() completed successfully."
-            )
-        
-        site = site or self.config.site
-        controller_type = self.controller_type
-        
-        self.logger.debug(
-            f"Getting security data for feature '{feature}'",
-            extra={
-                "feature": feature,
-                "controller_type": controller_type.value,
-                "normalize": normalize,
-                "site": site,
-            }
-        )
-        
-        # Use endpoint router to make request with fallback
-        result = await self._endpoint_router.request_with_fallback(
-            client=self,
-            feature=feature,
-            controller_type=controller_type,
-            site=site,
-        )
-        
-        # Add controller type to result
-        result["controller_type"] = controller_type.value
-        
-        # Normalize response if requested
-        if normalize and self._response_normalizer is not None:
-            result["data"] = self._normalize_security_data(
-                feature=feature,
-                data=result["data"],
-                controller_type=controller_type,
-            )
-        
-        return result
-    
-    def _normalize_security_data(
-        self,
-        feature: str,
-        data: Any,
-        controller_type: ControllerType,
-    ) -> Any:
-        """Normalize security data based on feature type.
-        
-        Args:
-            feature: Security feature name
-            data: Raw API response data
-            controller_type: Controller type for normalization
-        
-        Returns:
-            Normalized data (list of dicts or dict depending on feature)
-        """
-        if self._response_normalizer is None:
-            return data
-        
-        # Extract data from response wrapper if present
-        raw_data = data
-        if isinstance(data, dict):
-            # UniFi API often wraps data in {"data": [...]} or {"meta": {...}, "data": [...]}
-            if "data" in data:
-                raw_data = data["data"]
-        
-        # Normalize based on feature type
-        if feature == "firewall_rules":
-            if isinstance(raw_data, list):
-                normalized = self._response_normalizer.normalize_firewall_rules(
-                    raw_data, controller_type
-                )
-                return self._response_normalizer.to_dict_list(normalized)
-            return raw_data
-        
-        elif feature == "ips_status":
-            if isinstance(raw_data, dict):
-                normalized = self._response_normalizer.normalize_ips_status(
-                    raw_data, controller_type
-                )
-                return self._response_normalizer.to_dict(normalized)
-            elif isinstance(raw_data, list) and len(raw_data) > 0:
-                # Some endpoints return IPS settings as a list with one item
-                normalized = self._response_normalizer.normalize_ips_status(
-                    raw_data[0], controller_type
-                )
-                return self._response_normalizer.to_dict(normalized)
-            return raw_data
-        
-        elif feature == "traffic_routes":
-            if isinstance(raw_data, list):
-                normalized = self._response_normalizer.normalize_traffic_routes(
-                    raw_data, controller_type
-                )
-                return self._response_normalizer.to_dict_list(normalized)
-            return raw_data
-        
-        elif feature == "port_forwards":
-            if isinstance(raw_data, list):
-                normalized = self._response_normalizer.normalize_port_forwards(
-                    raw_data, controller_type
-                )
-                return self._response_normalizer.to_dict_list(normalized)
-            return raw_data
-        
-        else:
-            # Unknown feature, return as-is
-            self.logger.warning(
-                f"Unknown feature '{feature}' for normalization, returning raw data"
-            )
-            return raw_data
