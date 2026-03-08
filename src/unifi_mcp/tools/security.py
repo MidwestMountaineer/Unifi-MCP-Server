@@ -437,40 +437,78 @@ class GetIPSStatusTool(BaseTool):
         stats: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """Format IPS status for AI consumption.
-        
+
+        The /get/setting/ips endpoint returns a rich data model. Key quirk:
+        there is NO top-level "enabled" boolean. IPS being active is indicated
+        by the "ips_mode" field: "ips" = IPS (block), "ids" = IDS (detect only),
+        absent/empty = disabled.
+
+        The "suppression" field is a nested object with "alerts" and "whitelist"
+        arrays, not flat booleans.
+
         Args:
             config: IPS configuration from UniFi API
             stats: IPS statistics from UniFi API
-        
+
         Returns:
             Formatted IPS status
         """
         # Calculate threat statistics
         threat_stats = self._calculate_threat_stats(stats)
-        
-        # Convert boolean values to strings for MCP compatibility
-        enabled = config.get("enabled", False)
-        suppression_enabled = config.get("suppression_enabled", False)
-        
+
+        # Derive enabled state from ips_mode (no "enabled" boolean in API)
+        ips_mode = config.get("ips_mode", "")
+        enabled = bool(ips_mode)  # Any non-empty mode means active
+
+        # Suppression is a nested object, not flat booleans
+        suppression = config.get("suppression", {})
+        suppression_alerts = suppression.get("alerts", []) if isinstance(suppression, dict) else []
+        suppression_whitelist = suppression.get("whitelist", []) if isinstance(suppression, dict) else []
+
+        # Boolean features
+        dns_filtering = config.get("dns_filtering", False)
+        honeypot_enabled = config.get("honeypot_enabled", False)
+        ad_blocking_enabled = config.get("ad_blocking_enabled", False)
+        memory_optimized = config.get("memory_optimized", False)
+        endpoint_scanning = config.get("endpoint_scanning", False)
+
         status = {
             # Basic configuration
             "enabled": "yes" if enabled else "no",
-            "enabled_bool": enabled,  # Keep boolean for programmatic use
+            "enabled_bool": enabled,
             "key": str(config.get("key", "ips")),
-            
-            # Detection settings
-            "suppression_enabled": "yes" if suppression_enabled else "no",
-            "suppression_enabled_bool": suppression_enabled,  # Keep boolean for programmatic use
-            "suppression_mode": str(config.get("suppression_mode", "")),
-            
+            "ips_mode": str(ips_mode) if ips_mode else "disabled",
+
+            # Suppression (derived from nested object)
+            "suppression_alerts_count": len(suppression_alerts),
+            "suppression_whitelist_count": len(suppression_whitelist),
+
+            # Security features
+            "dns_filtering": "yes" if dns_filtering else "no",
+            "dns_filtering_bool": dns_filtering,
+            "honeypot_enabled": "yes" if honeypot_enabled else "no",
+            "honeypot_enabled_bool": honeypot_enabled,
+            "ad_blocking_enabled": "yes" if ad_blocking_enabled else "no",
+            "ad_blocking_enabled_bool": ad_blocking_enabled,
+            "memory_optimized": "yes" if memory_optimized else "no",
+            "memory_optimized_bool": memory_optimized,
+            "endpoint_scanning": "yes" if endpoint_scanning else "no",
+            "endpoint_scanning_bool": endpoint_scanning,
+
+            # Scope — which categories and networks IPS covers
+            "enabled_categories": config.get("enabled_categories", []),
+            "enabled_categories_count": len(config.get("enabled_categories", [])),
+            "enabled_networks": config.get("enabled_networks", []),
+            "enabled_networks_count": len(config.get("enabled_networks", [])),
+
             # Threat statistics
             "threat_statistics": threat_stats,
-            
-            # Signature information
+
+            # Signature information (may not be present in API response)
             "signature_version": str(config.get("signature_version", "unknown")),
             "last_signature_update": str(config.get("last_signature_update", "unknown")),
         }
-        
+
         return status
     
     def _calculate_threat_stats(
